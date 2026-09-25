@@ -30,6 +30,11 @@ configuration changes, events, cancellation, reset, and setup-exit recovery.
 
 Add the remaining tests that do not require a complete VPN service.
 
+The automated coverage and its resource, reconciliation, and path-identity
+contracts are recorded in
+[Controller Step 1 validation](controller-step1-validation.md). Native execution
+evidence is stored with each Windows CI run.
+
 ### Step 1 tests
 
 1. Repeat event cancellation while control operations run.

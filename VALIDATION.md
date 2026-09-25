@@ -53,15 +53,24 @@ VirtIO media and the pinned signed driver 1.3.0.0:
   build in the guest.
 - The live gate verifies the staged and installed driver hashes, version,
   service configuration, and Authenticode signer before service start.
-- Two complete controller lifecycles pass as `SYSTEM`, including WFP fixture
-  creation, initialization, process registration, IPv4 and IPv6 address
-  round-trips, Unicode exclusions, descendant state, configuration changes,
-  events, cancellation, and reset.
+- Four warm-up and four measured controller lifecycles pass as `SYSTEM`,
+  including WFP fixture creation, initialization, process registration, IPv4 and
+  IPv6 address round-trips, Unicode exclusions, descendant state, configuration
+  changes, events, cancellation, and reset.
+- One hundred measured event-read cancellations pass after warm-up while state
+  and address queries run. The four batches stay at 161 handles and two
+  goroutines in the recorded run.
+- Cancellation before a read, during pending I/O, and during controller close
+  passes. The close case reopens and reconciles the retained driver state.
+- Normal and extended-prefix launches resolve to one driver path. A hard-link
+  launch uses its separate hard-link path and needs a separate exclusion.
 - Recovery passes after setup exits at the WFP, open, initialize, register, and
   configure phases. The driver service is stopped after the gate.
 
-Native Windows arm64 execution, packet-flow tests, real VPN routing, and Secure
-Boot or HVCI qualification have not run.
+The workflow now runs the native unit and signed-driver suites on Windows amd64
+and arm64 GitHub-hosted runners. Native arm64 execution has not run in this
+local validation session. Packet-flow tests, real VPN routing, and Secure Boot
+or HVCI qualification have not run.
 
 On Windows amd64, `go test ./...` exercises native path resolution and process
 snapshotting without requiring the driver or elevation. Cross-compile arm64

@@ -27,7 +27,15 @@ jobs:
       - run: dev/winvm/tests/host-scripts.sh
 
   windows:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            architecture: amd64
+          - runner: windows-11-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -39,14 +47,31 @@ jobs:
         env:
           GO_EXPECTED_VERSION: 1.25.5
         run: ./dev/winvm/test.ps1
-      - name: Compile ARM64
+
+  windows-live-driver:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            architecture: amd64
+          - runner: windows-11-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Run native signed-driver gate
         shell: pwsh
-        run: |
-          $env:GOARCH = 'arm64'
-          $env:CGO_ENABLED = '0'
-          go build ./...
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go test -c -o controller-arm64.test.exe .
+        run: ./dev/winvm/host-e2e.ps1 -ArtifactDir "$env:RUNNER_TEMP\live-driver-artifacts"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-driver-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/live-driver-artifacts
 
   upstream-abi:
     runs-on: ubuntu-latest

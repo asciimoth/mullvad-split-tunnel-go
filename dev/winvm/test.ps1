@@ -21,6 +21,12 @@ function Invoke-Logged([string]$Name, [string]$Command, [string[]]$Arguments) {
     if ($exitCode -ne 0) { throw "$Name failed with exit code $exitCode" }
 }
 try {
+    Get-ChildItem (Join-Path $PSScriptRoot '*.ps1') | ForEach-Object {
+        $tokens = $null
+        $parseErrors = $null
+        [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+        if ($parseErrors.Count -ne 0) { throw "PowerShell parse failed for $($_.Name): $($parseErrors -join '; ')" }
+    }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     if ($RequireStandardUser -and ($identity.IsSystem -or $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))) {
@@ -29,7 +35,7 @@ try {
     if ($ImageManifest) {
         $manifest = Get-Content -LiteralPath $ImageManifest -Raw | ConvertFrom-Json
         if (-not $ExpectedGoVersion) {
-            if ($manifest.goVersion -notmatch '^go version go(?<Version>\S+) windows/amd64$') { throw 'Invalid image Go version' }
+            if ($manifest.goVersion -notmatch '^go version go(?<Version>\S+) windows/(?<Architecture>amd64|arm64)$') { throw 'Invalid image Go version' }
             $ExpectedGoVersion = $Matches.Version
         }
     }
@@ -37,6 +43,9 @@ try {
         $actual = (& go env GOVERSION | Out-String).Trim()
         if ($actual -ne "go$ExpectedGoVersion") { throw "Go version is $actual, not go$ExpectedGoVersion" }
     }
+    $nativeArchitecture = switch ($env:PROCESSOR_ARCHITECTURE) { 'AMD64' { 'amd64' } 'ARM64' { 'arm64' } default { throw "Unsupported native architecture: $env:PROCESSOR_ARCHITECTURE" } }
+    $goArchitecture = (& go env GOARCH | Out-String).Trim()
+    if ($goArchitecture -ne $nativeArchitecture) { throw "Go architecture is $goArchitecture, not native $nativeArchitecture" }
     Invoke-Logged 'go-version' 'go' @('version')
     Invoke-Logged 'go-env' 'go' @('env')
     Invoke-Logged 'go-mod-verify' 'go' @('mod', 'verify')
@@ -52,9 +61,11 @@ try {
     $ErrorActionPreference = $savedPreference
     if ($testExitCode -ne 0) { throw "tests failed with exit code $testExitCode" }
     $parsed = @(Get-Content $events | Where-Object { $_ -match '^\s*\{' } | ConvertFrom-Json)
-    $required = 'TestResolveOwnExecutableAndSnapshot'
-    if ($parsed | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $required -and $_.Action -eq 'skip' }) { throw "$required was skipped" }
-    if (-not ($parsed | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $required -and $_.Action -eq 'pass' })) { throw "$required has no pass event" }
+    $required = @('TestResolveOwnExecutableAndSnapshot', 'TestTimedOutMutationsCanBeReconciled')
+    foreach ($test in $required) {
+        if ($parsed | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'skip' }) { throw "$test was skipped" }
+        if (-not ($parsed | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'pass' })) { throw "$test has no pass event" }
+    }
     $parsed | Where-Object Action -eq output | ForEach-Object Output | Set-Content (Join-Path $ArtifactDir 'tests.log')
     Invoke-Logged 'go-build' 'go' @('build', './...')
 } finally { Stop-Transcript | Out-Null }

@@ -91,4 +91,14 @@ state through the packaged working tree and run metadata. A successful gate also
 requires retrieval of the guest artifact archive.
 
 Native arm64 execution, Secure Boot or HVCI qualification, packet-flow tests,
-and deployment install or upgrade tests are outside this first appliance.
+and deployment install or upgrade tests are outside this QEMU appliance. The
+GitHub Actions native matrix runs the ordinary and signed-driver suites on
+Windows amd64 and arm64 hosts. On another disposable native host, use:
+
+```powershell
+./dev/winvm/test.ps1
+./dev/winvm/host-e2e.ps1 -AllowDisposableHost
+```
+
+The second command stages a kernel driver and must not run on a workstation or a
+host used by another VPN service.

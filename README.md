@@ -146,10 +146,13 @@ uncertain completion.
 
 ## Compatibility and scope
 
-Executable exclusions also apply to descendants according to the driver. There
-is no arbitrary PID/include-only routing API, packet capture API, or
-socket-owner query API here. `QueryProcess` returns the driver's process
-classification.
+Executable exclusions also apply to descendants according to the driver. An
+exclusion matches an exact NT path. A hard-link name is a separate path and must
+be configured separately. See the
+[Step 1 validation notes](docs/controller-step1-validation.md) for the tested
+normal, extended-prefix, and hard-link launch behavior. There is no arbitrary
+PID/include-only routing API, packet capture API, or socket-owner query API
+here. `QueryProcess` returns the driver's process classification.
 
 The target ABI is pinned to [win-split-tunnel commit 0a0eb97][upstream]. Version
 1.2.5 uses a different initialization protocol. The driver has no version-query

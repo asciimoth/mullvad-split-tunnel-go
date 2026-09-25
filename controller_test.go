@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -214,4 +216,165 @@ func TestShutdownClosesEvenIfResetFails(t *testing.T) {
 	if err := c.Shutdown(context.Background()); !errors.Is(err, resetErr) || d.closed != 1 {
 		t.Fatalf("shutdown hid reset failure or leaked handle: %v, %d", err, d.closed)
 	}
+}
+
+// uncertainMutationTransport applies one mutation but reports the caller's
+// deadline. It models the important DeviceIoControl ambiguity: completion can
+// win in the driver after a caller has requested cancellation.
+type uncertainMutationTransport struct {
+	mu          sync.Mutex
+	state       State
+	addresses   Addresses
+	paths       []string
+	timeoutCode uint32
+}
+
+func (u *uncertainMutationTransport) close() error { return nil }
+
+func (u *uncertainMutationTransport) ioctl(ctx context.Context, code uint32, input, output []byte) (uint32, error) {
+	u.mu.Lock()
+	switch code {
+	case ioctlGetState:
+		copy(output, stateReply(u.state))
+		u.mu.Unlock()
+		return 8, nil
+	case ioctlGetAddresses:
+		encoded, err := encodeAddresses(u.addresses)
+		copy(output, encoded)
+		u.mu.Unlock()
+		return uint32(len(encoded)), err
+	case ioctlGetConfiguration:
+		encoded := make([]byte, configHeaderSize)
+		le.PutUint64(encoded[8:], configHeaderSize)
+		if len(u.paths) != 0 {
+			var err error
+			encoded, err = encodeConfiguration(u.paths)
+			if err != nil {
+				u.mu.Unlock()
+				return 0, err
+			}
+		}
+		if len(output) == 8 {
+			le.PutUint64(output, uint64(len(encoded)))
+			u.mu.Unlock()
+			return 8, nil
+		}
+		copy(output, encoded)
+		u.mu.Unlock()
+		return uint32(len(encoded)), nil
+	}
+
+	if code != u.timeoutCode {
+		u.mu.Unlock()
+		return 0, fmt.Errorf("unexpected IOCTL %#x", code)
+	}
+	var err error
+	switch code {
+	case ioctlInitialize:
+		u.state = StateInitialized
+	case ioctlRegisterProcesses:
+		u.state = StateReady
+	case ioctlRegisterAddresses:
+		u.addresses, err = decodeAddresses(input)
+	case ioctlSetConfiguration:
+		u.paths, err = decodeConfiguration(input)
+	case ioctlClearConfiguration:
+		u.paths = nil
+	case ioctlReset:
+		u.state = StateStarted
+		u.addresses = Addresses{}
+		u.paths = nil
+	}
+	u.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func deadlineContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func requireDeadline(t *testing.T, err error) {
+	t.Helper()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("mutation did not report its uncertain deadline: %v", err)
+	}
+}
+
+func TestTimedOutMutationsCanBeReconciled(t *testing.T) {
+	guidA, _ := ParseGUID("00112233-4455-6677-8899-aabbccddeeff")
+	guidB, _ := ParseGUID("ffeeddcc-bbaa-9988-7766-554433221100")
+	wantAddresses := Addresses{
+		TunnelIPv4:   netip.MustParseAddr("10.64.0.2"),
+		InternetIPv4: netip.MustParseAddr("192.0.2.2"),
+		TunnelIPv6:   netip.MustParseAddr("fd00::2"),
+		InternetIPv6: netip.MustParseAddr("2001:db8::2"),
+	}
+	wantPaths := []string{`\Device\HarddiskVolume1\Program Files\test.exe`}
+
+	t.Run("initialize/state", func(t *testing.T) {
+		d := &uncertainMutationTransport{state: StateStarted, timeoutCode: ioctlInitialize}
+		c := newController(d)
+		defer closeController(t, c)
+		requireDeadline(t, c.Initialize(deadlineContext(t), Sublayers{guidA, guidB}))
+		if got, err := c.State(context.Background()); err != nil || got != StateInitialized {
+			t.Fatalf("reconcile initialize: %v, %v", got, err)
+		}
+	})
+
+	t.Run("register processes/state", func(t *testing.T) {
+		d := &uncertainMutationTransport{state: StateInitialized, timeoutCode: ioctlRegisterProcesses}
+		c := newController(d)
+		defer closeController(t, c)
+		requireDeadline(t, c.RegisterProcesses(deadlineContext(t), []Process{{PID: 1}}))
+		if got, err := c.State(context.Background()); err != nil || got != StateReady {
+			t.Fatalf("reconcile process registration: %v, %v", got, err)
+		}
+	})
+
+	t.Run("set addresses/query", func(t *testing.T) {
+		d := &uncertainMutationTransport{state: StateReady, timeoutCode: ioctlRegisterAddresses}
+		c := newController(d)
+		defer closeController(t, c)
+		requireDeadline(t, c.SetAddresses(deadlineContext(t), wantAddresses))
+		if got, err := c.Addresses(context.Background()); err != nil || !reflect.DeepEqual(got, wantAddresses) {
+			t.Fatalf("reconcile addresses: %#v, %v", got, err)
+		}
+	})
+
+	t.Run("set exclusions/query", func(t *testing.T) {
+		d := &uncertainMutationTransport{state: StateReady, timeoutCode: ioctlSetConfiguration}
+		c := newController(d)
+		defer closeController(t, c)
+		requireDeadline(t, c.SetExcludedDevicePaths(deadlineContext(t), wantPaths))
+		if got, err := c.ExcludedDevicePaths(context.Background()); err != nil || !reflect.DeepEqual(got, wantPaths) {
+			t.Fatalf("reconcile exclusions: %#v, %v", got, err)
+		}
+	})
+
+	t.Run("clear exclusions/query", func(t *testing.T) {
+		d := &uncertainMutationTransport{state: StateEngaged, paths: wantPaths, timeoutCode: ioctlClearConfiguration}
+		c := newController(d)
+		defer closeController(t, c)
+		requireDeadline(t, c.ClearConfiguration(deadlineContext(t)))
+		if got, err := c.ExcludedDevicePaths(context.Background()); err != nil || len(got) != 0 {
+			t.Fatalf("reconcile cleared exclusions: %#v, %v", got, err)
+		}
+	})
+
+	t.Run("reset/state", func(t *testing.T) {
+		d := &uncertainMutationTransport{state: StateEngaged, addresses: wantAddresses, paths: wantPaths, timeoutCode: ioctlReset}
+		c := newController(d)
+		defer closeController(t, c)
+		requireDeadline(t, c.Reset(deadlineContext(t)))
+		if got, err := c.State(context.Background()); err != nil || got != StateStarted {
+			t.Fatalf("reconcile reset: %v, %v", got, err)
+		}
+	})
 }
