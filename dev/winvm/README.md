@@ -93,8 +93,7 @@ script changes do not rebuild Windows. Each run records its script and source
 state through the packaged working tree and run metadata. A successful gate also
 requires retrieval of the guest artifact archive.
 
-Native arm64 packet-flow execution, Secure Boot or HVCI qualification, and
-deployment install or upgrade tests are outside this QEMU appliance. The GitHub
+Native arm64 packet-flow execution is outside this QEMU appliance. The GitHub
 Actions native matrix runs the ordinary and signed-driver suites on Windows
 amd64 and arm64 hosts. On another disposable native host, use:
 
@@ -104,4 +103,4 @@ amd64 and arm64 hosts. On another disposable native host, use:
 ```
 
 The second command stages a kernel driver and must not run on a workstation or a
-host used by another VPN service.
+host where the driver is in use.

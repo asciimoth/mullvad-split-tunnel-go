@@ -283,6 +283,17 @@ func decodeAddresses(b []byte) (Addresses, error) {
 	return Addresses{read(b[:4]), read(b[4:8]), read(b[8:24]), read(b[24:40])}, nil
 }
 
+func decodeState(b []byte) (State, error) {
+	if len(b) != 8 {
+		return 0, fmt.Errorf("%w: state must be a 64-bit SIZE_T", ErrProtocol)
+	}
+	state := State(le.Uint64(b))
+	if state > StateZombie {
+		return 0, fmt.Errorf("%w: unknown driver state %d", ErrProtocol, state)
+	}
+	return state, nil
+}
+
 func decodePID(b []byte) (uint32, error) {
 	if len(b) < 8 || le.Uint64(b) > uint64(^uint32(0)) {
 		return 0, fmt.Errorf("%w: invalid PID-sized HANDLE", ErrProtocol)
@@ -333,6 +344,10 @@ func decodeEvent(b []byte) (Event, error) {
 		}
 		e.PID, err = decodePID(payload)
 		e.Reason = Reason(le.Uint32(payload[8:]))
+		const validReasons = ReasonInheritance | ReasonConfig | ReasonArriving | ReasonDeparting
+		if e.Reason == 0 || e.Reason&^validReasons != 0 {
+			return e, fmt.Errorf("%w: invalid splitting reason", ErrProtocol)
+		}
 		size, offset = int(le.Uint16(payload[12:])), 14
 	case EventErrorStartSplitting, EventErrorStopSplitting:
 		if len(payload) < 10 {

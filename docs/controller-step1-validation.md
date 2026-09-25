@@ -18,6 +18,10 @@ reopens the device, reads the retained driver state, and resets it. Thus, the
 test verifies that close drains the request without treating close as
 authorization to reset driver policy.
 
+`TestResetCompletesPendingEventRead` resets the driver while an event dequeue is
+pending. It verifies that reset cancels the dequeue, that the caller receives an
+error, and that the driver returns to `Started`.
+
 `TestDriverLifecycle` runs four warm-up cycles and four measured cycles. Each
 cycle creates a WFP fixture, opens and initializes the controller, reads an
 event, resets the driver, and closes the controller. The test records handles
@@ -61,6 +65,28 @@ Callers must keep the original DOS path and refresh the resolved NT path after a
 rename, replacement, hard-link change, or volume remount. A caller that wants to
 exclude more than one hard-link name must configure each name.
 
+## Process registration and event reasons
+
+`TestSnapshotRegistrationReplaysProcessChanges` starts one process and starts
+then stops another process after the initial snapshot but before registration.
+After registration, the arriving process is present and the departed process is
+absent. The portable snapshot test separately verifies that unverified ancestry
+is removed instead of assigning a recycled parent PID.
+
+`TestArrivalAndDepartureEventReasons` verifies exact live-driver values. An
+excluded process arrival reports `ReasonConfig | ReasonArriving`. Its exit
+reports `ReasonDeparting`.
+
+## ABI fixture
+
+The C++ fixture includes the pinned upstream headers and covers configuration,
+process registration, `ST_IP_ADDRESSES`, sublayer GUIDs, process queries, all
+driver states, all event IDs, all event reasons, every event payload variant,
+and every IOCTL. Go tests decode each response fixture and reject malformed
+address, state, event, process-query, and configuration responses. The ABI CI
+job regenerates the fixture from upstream commit `0a0eb97` and compares it byte
+for byte with `testdata/abi.json`.
+
 ## Architecture gates
 
 The GitHub Actions Windows matrix runs the ordinary native suite and the signed
@@ -78,4 +104,4 @@ For a separate disposable host, run:
 ```
 
 `host-e2e.ps1` stages and starts the pinned test driver. Do not run it on a
-workstation or a host that another VPN service uses.
+workstation or a host where the driver is in use.

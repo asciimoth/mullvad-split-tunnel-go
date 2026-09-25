@@ -112,10 +112,7 @@ func (c *Controller) state(ctx context.Context) (State, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(b) != 8 {
-		return 0, fmt.Errorf("%w: state must be a 64-bit SIZE_T", ErrProtocol)
-	}
-	return State(le.Uint64(b)), nil
+	return decodeState(b)
 }
 
 func (c *Controller) requireState(ctx context.Context, allowed ...State) error {

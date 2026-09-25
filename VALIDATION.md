@@ -76,8 +76,7 @@ VirtIO media and the pinned signed driver 1.3.0.0:
 
 The workflow now runs the native unit and signed-driver suites on Windows amd64
 and arm64 GitHub-hosted runners. Native arm64 execution has not run in this
-local validation session. Native arm64 packet-flow tests, real VPN routing, and
-Secure Boot or HVCI qualification have not run.
+local validation session. Native arm64 packet-flow tests have not run.
 
 On Windows amd64, `go test ./...` exercises native path resolution and process
 snapshotting without requiring the driver or elevation. Cross-compile arm64
@@ -107,7 +106,7 @@ The underlying commands use a 64-bit C++17 compiler:
 ```sh
 g++ -std=c++17 -Wall -Wextra -Werror \
   -I ../win-split-tunnel/src \
-  tools/abi_fixture.cpp -o abi-fixture
+  -I tools/abi_compat tools/abi_fixture.cpp -o abi-fixture
 ./abi-fixture > abi-generated.json
 cmp testdata/abi.json abi-generated.json
 ```
@@ -117,9 +116,9 @@ is not a Windows WDK build or evidence that kernel behavior works.
 
 ## Native-driver gate
 
-The privileged integration harness implements controller-plan milestone C2 in a
-dedicated disposable VM. It uses the compatible driver, test-owned persistent
-WFP sublayers, and no competing owner. Run it alone with:
+The privileged integration harness validates the controller against the driver
+in a dedicated disposable VM. It uses the compatible driver, test-owned
+persistent WFP sublayers, and no competing owner. Run it alone with:
 
 ```sh
 just test-windows-e2e
@@ -133,7 +132,7 @@ adapter-address changes.
 
 Live-driver tests remain separate from ordinary `go test ./...`. They are part
 of the explicit `test-total` gate. Neither unit tests nor the diagnostic command
-installs a driver or creates a complete routing environment.
+changes the installed driver.
 
 The Nix development environment provides the pinned signed driver package for
 each supported architecture. Enter `nix develop` and copy the matching directory

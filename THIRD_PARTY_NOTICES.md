@@ -19,12 +19,6 @@ drivers, libraries, or sources.
   upstream checkout. Retain upstream notices if you redistribute those headers.
 - golang.org/x/sys v0.44.0 is an external dependency under the Go project's
   BSD-style license. It is referenced through go.mod, not vendored.
-- Wintun and winipcfg are discussed as dependencies of the future sysnet-windows
-  project; they are not dependencies of this controller.
-
-Any future binary distribution should record the exact driver package, signature
-verification result, architecture, hashes, and applicable license notices
-independently of the Go module version.
 
 [driver-binaries]: https://github.com/mullvad/mullvadvpn-app-binaries/commit/5b6f46cde692acb77ee74b37b9fd3f1678c45a52
 [upstream]: https://github.com/mullvad/win-split-tunnel/tree/0a0eb97

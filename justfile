@@ -76,4 +76,4 @@ winvm-tests:
 
 abi upstream="../win-split-tunnel":
     test -f "{{upstream}}/src/public.h"
-    tmp_dir="$(mktemp -d)"; trap 'rm -rf "$tmp_dir"' EXIT; g++ -std=c++17 -Wall -Wextra -Werror -I "{{upstream}}/src" tools/abi_fixture.cpp -o "$tmp_dir/abi-fixture"; "$tmp_dir/abi-fixture" > "$tmp_dir/abi.json"; cmp testdata/abi.json "$tmp_dir/abi.json"
+    tmp_dir="$(mktemp -d)"; trap 'rm -rf "$tmp_dir"' EXIT; g++ -std=c++17 -Wall -Wextra -Werror -I tools/abi_compat -I "{{upstream}}/src" tools/abi_fixture.cpp -o "$tmp_dir/abi-fixture"; "$tmp_dir/abi-fixture" > "$tmp_dir/abi.json"; cmp testdata/abi.json "$tmp_dir/abi.json"

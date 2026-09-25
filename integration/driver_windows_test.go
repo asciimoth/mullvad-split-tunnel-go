@@ -222,6 +222,31 @@ func readProcessEvents(t *testing.T, c *splittunnel.Controller, wanted map[uint3
 	}
 }
 
+func readExactProcessEvent(
+	t *testing.T,
+	c *splittunnel.Controller,
+	pid uint32,
+	id splittunnel.EventID,
+	reason splittunnel.Reason,
+) splittunnel.Event {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	for {
+		event, err := c.ReadEvent(ctx)
+		if err != nil {
+			t.Fatalf("read event for PID %d: %v", pid, err)
+		}
+		if event.PID != pid {
+			continue
+		}
+		if event.ID != id || event.Reason != reason {
+			t.Fatalf("event for PID %d: %#v; want ID %v and reason %v", pid, event, id, reason)
+		}
+		return event
+	}
+}
+
 func waitProcessSplit(t *testing.T, c *splittunnel.Controller, pid uint32, want bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -243,9 +268,10 @@ type liveSession struct {
 	t       *testing.T
 	c       *splittunnel.Controller
 	fixture *wfpFixture
+	reset   bool
 }
 
-func newLiveSession(t *testing.T) *liveSession {
+func newInitializedSession(t *testing.T) *liveSession {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -266,11 +292,19 @@ func newLiveSession(t *testing.T) *liveSession {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	return s
+}
+
+func newLiveSession(t *testing.T) *liveSession {
+	t.Helper()
+	s := newInitializedSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	snapshot, err := splittunnel.SnapshotProcesses()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.RegisterProcesses(ctx, snapshot.Processes); err != nil {
+	if err := s.c.RegisterProcesses(ctx, snapshot.Processes); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -282,19 +316,123 @@ func (s *liveSession) cleanup() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	reset := false
-	if err := s.c.Reset(ctx); err != nil {
-		s.t.Errorf("reset live session: %v", err)
-	} else {
-		reset = true
+	if !s.reset {
+		if err := s.c.Reset(ctx); err != nil {
+			s.t.Errorf("reset live session: %v", err)
+		} else {
+			s.reset = true
+		}
 	}
 	if err := s.c.Close(); err != nil {
 		s.t.Errorf("close live session: %v", err)
 	}
-	if err := s.fixture.close(reset); err != nil {
+	if err := s.fixture.close(s.reset); err != nil {
 		s.t.Errorf("close WFP fixture: %v", err)
 	}
 	s.c = nil
+}
+
+func TestSnapshotRegistrationReplaysProcessChanges(t *testing.T) {
+	s := newInitializedSession(t)
+	snapshot, err := splittunnel.SnapshotProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	arriving := startHelper(t, mustExecutable(t))
+	departing := exec.Command(mustExecutable(t), "-test.run=^TestHelperProcess$")
+	departing.Env = append(os.Environ(), "SPLIT_TUNNEL_HELPER=1")
+	if err := departing.Start(); err != nil {
+		t.Fatal(err)
+	}
+	departingPID := uint32(departing.Process.Pid)
+	if err := departing.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := departing.Wait(); err == nil {
+		t.Fatal("killed helper exited successfully")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.c.RegisterProcesses(ctx, snapshot.Processes); err != nil {
+		t.Fatal(err)
+	}
+	arrivingPID := uint32(arriving.Process.Pid)
+	if arrivingPID == departingPID {
+		t.Fatalf("test helpers unexpectedly reused PID %d", arrivingPID)
+	}
+	status := processStatus(t, s.c, arrivingPID, false)
+	if status.PID != arrivingPID {
+		t.Fatalf("arrival replay returned PID %d, want %d", status.PID, arrivingPID)
+	}
+	if _, err := s.c.QueryProcess(ctx, departingPID); err == nil {
+		t.Fatalf("departed PID %d remained in the driver registry", departingPID)
+	}
+}
+
+func TestArrivalAndDepartureEventReasons(t *testing.T) {
+	s := newLiveSession(t)
+	if err := s.c.SetAddresses(context.Background(), splittunnel.Addresses{
+		TunnelIPv4:   netip.MustParseAddr("10.64.0.2"),
+		InternetIPv4: netip.MustParseAddr("10.0.2.15"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	executable := mustExecutable(t)
+	copyPath := t.TempDir() + `\event-helper.exe`
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copyPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.c.SetExcludedPaths(context.Background(), []string{copyPath}); err != nil {
+		t.Fatal(err)
+	}
+	helper := startHelper(t, copyPath)
+	pid := uint32(helper.Process.Pid)
+	readExactProcessEvent(t, s.c, pid, splittunnel.EventStartSplitting,
+		splittunnel.ReasonConfig|splittunnel.ReasonArriving)
+	if err := helper.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := helper.Wait(); err == nil {
+		t.Fatal("killed helper exited successfully")
+	}
+	readExactProcessEvent(t, s.c, pid, splittunnel.EventStopSplitting,
+		splittunnel.ReasonDeparting)
+}
+
+func TestResetCompletesPendingEventRead(t *testing.T) {
+	s := newLiveSession(t)
+	done := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		_, err := s.c.ReadEvent(context.Background())
+		done <- err
+	}()
+	<-started
+	time.Sleep(10 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := s.c.Reset(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.reset = true
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("pending event read succeeded during reset")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reset did not complete the pending event read")
+	}
+	if state, err := s.c.State(ctx); err != nil || state != splittunnel.StateStarted {
+		t.Fatalf("state after reset with pending event read: %v, %v", state, err)
+	}
 }
 
 func cancelBlockedEvent(t *testing.T, c *splittunnel.Controller, checkControl bool) {

@@ -82,6 +82,6 @@ jobs:
           repository: mullvad/win-split-tunnel
           ref: 0a0eb97f67d1dbcb3d08bda66d3b24f465d95475
           path: upstream-driver
-      - run: g++ -std=c++17 -Wall -Wextra -Werror -I upstream-driver/src tools/abi_fixture.cpp -o abi-fixture
+      - run: g++ -std=c++17 -Wall -Wextra -Werror -I tools/abi_compat -I upstream-driver/src tools/abi_fixture.cpp -o abi-fixture
       - run: ./abi-fixture > /tmp/abi.json
       - run: cmp testdata/abi.json /tmp/abi.json

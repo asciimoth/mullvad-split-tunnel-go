@@ -1,7 +1,7 @@
 # Mullvad split-tunnel driver controller for Go
 
-An unofficial Go controller for the Mullvad Windows split-tunneling driver. It
-is intended for use as a separate dependency of `sysnet-windows`.
+An unofficial Go library for controlling the Mullvad Windows split-tunneling
+driver.
 
 The controller targets driver **1.3.0.0** on Windows **amd64/arm64**. Portable
 compilation, static analysis, race tests, fuzz tests, and Windows cross-builds
@@ -135,9 +135,9 @@ The driver sequence is:
 1. Stop and join workers, then `Shutdown`. Release caller WFP resources after
    successful driver reset.
 
-[examples/session/session.go](examples/session/session.go) implements the driver
-portion of that lifecycle with cleanup on errors. It is a library example
-accepting already-created resources, not a complete VPN executable.
+[examples/session/session.go](examples/session/session.go) implements this
+lifecycle with cleanup on errors. The example accepts already-created WFP and
+network resources.
 
 `Close` cancels and drains local I/O, then closes the handle. **It does not
 reset driver policy.** `Shutdown` attempts `Reset` and then `Close`. A cancelled

@@ -15,10 +15,21 @@ import (
 type abiFixture struct {
 	Configuration string
 	Processes     string
-	Event         string
-	Query         string
-	Sublayers     string
-	IOCTLs        []uint32
+	Addresses     string
+	States        []uint64
+	EventIDs      []uint32 `json:"event_ids"`
+	Reasons       []uint32
+	Events        struct {
+		Start        string
+		Stop         string
+		ErrorStart   string `json:"error_start"`
+		ErrorStop    string `json:"error_stop"`
+		ErrorMessage string `json:"error_message"`
+	}
+	QueryRequest string `json:"query_request"`
+	Query        string
+	Sublayers    string
+	IOCTLs       []uint32
 }
 
 func loadFixture(t *testing.T) abiFixture {
@@ -61,15 +72,73 @@ func TestABIFromUpstreamHeaders(t *testing.T) {
 	if err != nil || !bytes.Equal(got, unhex(t, f.Processes)) {
 		t.Fatalf("process registry differs from upstream C ABI: %x, %v", got, err)
 	}
-	event, err := decodeEvent(unhex(t, f.Event))
-	if err != nil || event.ID != EventStartSplitting || event.PID != 42 ||
-		event.Reason != ReasonConfig|ReasonArriving || event.ImagePath != fixturePaths()[0] {
-		t.Fatalf("decode C event: %+v, %v", event, err)
+	wantAddresses := Addresses{
+		TunnelIPv4:   netip.MustParseAddr("10.9.0.2"),
+		InternetIPv4: netip.MustParseAddr("192.0.2.11"),
+		TunnelIPv6:   netip.MustParseAddr("fd00::2"),
+		InternetIPv6: netip.MustParseAddr("2001:db8::3"),
+	}
+	got, err = encodeAddresses(wantAddresses)
+	if err != nil || !bytes.Equal(got, unhex(t, f.Addresses)) {
+		t.Fatalf("addresses differ from upstream C ABI: %x, %v", got, err)
+	}
+	if addresses, err := decodeAddresses(unhex(t, f.Addresses)); err != nil || addresses != wantAddresses {
+		t.Fatalf("decode C addresses: %+v, %v", addresses, err)
+	}
+	if !reflect.DeepEqual(f.States, []uint64{0, 1, 2, 3, 4, 5}) {
+		t.Fatalf("states differ from upstream enum: %v", f.States)
+	}
+	for _, value := range f.States {
+		b := make([]byte, 8)
+		le.PutUint64(b, value)
+		if state, err := decodeState(b); err != nil || uint64(state) != value {
+			t.Fatalf("decode C state %d: %v, %v", value, state, err)
+		}
+	}
+	if !reflect.DeepEqual(f.EventIDs, []uint32{0, 1, 0x80000001, 0x80000002, 0x80000003}) {
+		t.Fatalf("event IDs differ from upstream enum: %v", f.EventIDs)
+	}
+	if !reflect.DeepEqual(f.Reasons, []uint32{1, 2, 4, 8}) {
+		t.Fatalf("event reasons differ from upstream enum: %v", f.Reasons)
+	}
+	eventCases := []struct {
+		name      string
+		wire      string
+		id        EventID
+		reason    Reason
+		message   string
+		status    uint32
+		imagePath string
+	}{
+		{"start", f.Events.Start, EventStartSplitting, ReasonConfig | ReasonArriving, "", 0, fixturePaths()[0]},
+		{"stop", f.Events.Stop, EventStopSplitting, ReasonDeparting, "", 0, fixturePaths()[0]},
+		{"error start", f.Events.ErrorStart, EventErrorStartSplitting, 0, "", 0, fixturePaths()[0]},
+		{"error stop", f.Events.ErrorStop, EventErrorStopSplitting, 0, "", 0, fixturePaths()[0]},
+		{"error message", f.Events.ErrorMessage, EventErrorMessage, 0, "driver error", 0xc0000001, ""},
+	}
+	for _, test := range eventCases {
+		t.Run(test.name, func(t *testing.T) {
+			event, err := decodeEvent(unhex(t, test.wire))
+			wantPID := uint32(0)
+			if test.imagePath != "" {
+				wantPID = 42
+			}
+			if err != nil || event.ID != test.id || event.PID != wantPID ||
+				event.Reason != test.reason || event.ImagePath != test.imagePath ||
+				event.Message != test.message || event.NTStatus != test.status {
+				t.Fatalf("decode C event: %+v, %v", event, err)
+			}
+		})
 	}
 	process, err := decodeProcess(unhex(t, f.Query))
 	if err != nil || process.PID != 42 || process.ParentPID != 7 ||
 		!process.Split || process.ImagePath != fixturePaths()[0] {
 		t.Fatalf("decode C query with trailing struct padding: %+v, %v", process, err)
+	}
+	queryRequest := make([]byte, 8)
+	le.PutUint64(queryRequest, 42)
+	if !bytes.Equal(queryRequest, unhex(t, f.QueryRequest)) {
+		t.Fatalf("process query request differs from upstream C ABI: %x", queryRequest)
 	}
 	a, _ := ParseGUID("00112233-4455-6677-8899-aabbccddeeff")
 	b, _ := ParseGUID("{ffeeddcc-bbaa-9988-7766-554433221100}")
@@ -86,6 +155,70 @@ func TestABIFromUpstreamHeaders(t *testing.T) {
 		ioctlQueryProcess, ioctlReset}
 	if !reflect.DeepEqual(ioctls, f.IOCTLs) {
 		t.Fatalf("IOCTLs differ from upstream CTL_CODE values: %x versus %x", ioctls, f.IOCTLs)
+	}
+}
+
+func TestRejectMalformedABIResponses(t *testing.T) {
+	f := loadFixture(t)
+	for _, b := range [][]byte{nil, make([]byte, addressesSize-1), make([]byte, addressesSize+1)} {
+		if _, err := decodeAddresses(b); !errors.Is(err, ErrProtocol) {
+			t.Errorf("accepted address response of length %d: %v", len(b), err)
+		}
+	}
+	for name, b := range map[string][]byte{
+		"short":   make([]byte, 7),
+		"unknown": {6, 0, 0, 0, 0, 0, 0, 0},
+	} {
+		t.Run("state "+name, func(t *testing.T) {
+			if _, err := decodeState(b); !errors.Is(err, ErrProtocol) {
+				t.Fatalf("accepted malformed state: %v", err)
+			}
+		})
+	}
+	events := map[string][]byte{
+		"start":         unhex(t, f.Events.Start),
+		"stop":          unhex(t, f.Events.Stop),
+		"error start":   unhex(t, f.Events.ErrorStart),
+		"error stop":    unhex(t, f.Events.ErrorStop),
+		"error message": unhex(t, f.Events.ErrorMessage),
+	}
+	for name, valid := range events {
+		t.Run("truncated "+name, func(t *testing.T) {
+			b := bytes.Clone(valid[:len(valid)-1])
+			le.PutUint64(b[8:], uint64(len(b)-eventHeaderSize))
+			if _, err := decodeEvent(b); !errors.Is(err, ErrProtocol) {
+				t.Fatalf("accepted truncated event: %v", err)
+			}
+		})
+	}
+	for name, reason := range map[string]uint32{"zero": 0, "unknown bit": 16} {
+		t.Run("reason "+name, func(t *testing.T) {
+			b := unhex(t, f.Events.Start)
+			le.PutUint32(b[eventHeaderSize+8:], reason)
+			if _, err := decodeEvent(b); !errors.Is(err, ErrProtocol) {
+				t.Fatalf("accepted malformed event reason: %v", err)
+			}
+		})
+	}
+	for _, fixture := range []string{f.Events.Start, f.Events.ErrorStart} {
+		b := unhex(t, fixture)
+		le.PutUint64(b[eventHeaderSize:], uint64(^uint32(0))+1)
+		if _, err := decodeEvent(b); !errors.Is(err, ErrProtocol) {
+			t.Fatalf("accepted event PID outside uint32: %v", err)
+		}
+	}
+	query := unhex(t, f.Query)
+	for name, mutate := range map[string]func([]byte) []byte{
+		"short":           func(b []byte) []byte { return b[:21] },
+		"invalid boolean": func(b []byte) []byte { b[16] = 2; return b },
+		"wrong length":    func(b []byte) []byte { le.PutUint16(b[18:], 2); return b },
+		"oversized PID":   func(b []byte) []byte { le.PutUint64(b, uint64(^uint32(0))+1); return b },
+	} {
+		t.Run("query "+name, func(t *testing.T) {
+			if _, err := decodeProcess(mutate(bytes.Clone(query))); !errors.Is(err, ErrProtocol) {
+				t.Fatalf("accepted malformed query response: %v", err)
+			}
+		})
 	}
 }
 
@@ -207,7 +340,9 @@ func FuzzDriverDecoders(f *testing.F) {
 	if err == nil {
 		var fixture abiFixture
 		if json.Unmarshal(data, &fixture) == nil {
-			for _, s := range []string{fixture.Configuration, fixture.Event, fixture.Query} {
+			for _, s := range []string{fixture.Configuration, fixture.Query, fixture.Events.Start,
+				fixture.Events.Stop, fixture.Events.ErrorStart, fixture.Events.ErrorStop,
+				fixture.Events.ErrorMessage} {
 				b, _ := hex.DecodeString(s)
 				f.Add(b)
 			}
@@ -218,6 +353,8 @@ func FuzzDriverDecoders(f *testing.F) {
 			t.Skip()
 		}
 		_, _ = decodeConfiguration(b)
+		_, _ = decodeAddresses(b)
+		_, _ = decodeState(b)
 		_, _ = decodeEvent(b)
 		_, _ = decodeProcess(b)
 	})

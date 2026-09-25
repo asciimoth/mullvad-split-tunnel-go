@@ -1,4 +1,4 @@
-# Remaining plan: Mullvad Windows driver controller in Go
+# Remaining plan: Mullvad Windows driver controller library
 
 This document lists the remaining work for `mullvad-split-tunnel-go` in the
 order in which it should be done. See the [README](../README.md) for the
@@ -12,28 +12,32 @@ and the disposable Windows amd64 live-driver gate pass.
 
 The live-driver gate covers WFP fixture creation, initialization, process
 registration, address round-trips, Unicode exclusions, descendants,
-configuration changes, events, cancellation, reset, and setup-exit recovery.
+configuration changes, events, cancellation, reset, and setup-exit recovery. The
+controller exposes all IOCTLs in the pinned driver. Remaining work closes
+ABI-fixture, process-race, address-mode, WFP-interaction, and platform
+qualification gaps before the API is frozen. The repository also needs a small
+end-to-end tunnel command that proves the library is useful outside the test
+harness and provides a complete usage example.
 
 ## Fixed rules
 
 - Support exact executable-path exclusions and their descendants.
 - Use pinned, Mullvad-signed driver binaries. Do not build or modify the driver.
 - Support driver 1.3.0.0, pinned to upstream commit `0a0eb97`.
-- Keep driver deployment, TUN management, routing, DNS policy, and WFP resource
-  ownership outside the core package.
 - Treat the global, exclusive `\\.\MULLVADSPLITTUNNEL` device as a shared-system
-  resource. Do not stop another VPN service to claim it.
-- Accept only a verified package with the expected hash, architecture, signer,
-  version, and ABI.
+  resource. Do not interfere with another process that owns it.
+- Run live tests only with verified driver files that have the expected hash,
+  architecture, signer, version, and ABI.
 
 ## Step 1: Complete controller-level validation
 
-Add the remaining tests that do not require a complete VPN service.
+This step is implemented. The portable suite, signed-driver suite, and ABI CI
+gate contain the tests below. Native execution evidence is stored with each
+Windows CI run.
 
 The automated coverage and its resource, reconciliation, and path-identity
 contracts are recorded in
-[Controller Step 1 validation](controller-step1-validation.md). Native execution
-evidence is stored with each Windows CI run.
+[Controller Step 1 validation](controller-step1-validation.md).
 
 ### Step 1 tests
 
@@ -48,6 +52,14 @@ evidence is stored with each Windows CI run.
    read and reconcile the resulting state.
 1. Test exclusions through hard links and alternate executable launch paths.
    Record how the driver identifies each path.
+1. Start and stop processes between the initial snapshot and process
+   registration. Confirm that buffered arrival and departure notifications leave
+   the driver with the correct process registry.
+1. Verify arrival and departure event reasons, and reset the driver while an
+   event dequeue is pending.
+1. Extend the C++ ABI fixture to cover `ST_IP_ADDRESSES`, every state, event ID,
+   and reason value, and every event payload variant. Add matching decoder and
+   malformed-response tests.
 1. Run the native unit suite and the live-driver smoke suite on Windows arm64.
 
 ### Step 1 completion gate
@@ -60,14 +72,19 @@ evidence is stored with each Windows CI run.
 - Every uncertain mutation has a tested reconciliation path.
 - Hard-link and alternate-launch behavior is documented and has regression
   coverage.
+- Process changes during snapshot registration are not lost or assigned to a
+  recycled PID.
+- The committed ABI fixture independently covers every public wire structure and
+  enum used by the controller.
 - The same native smoke suite passes on Windows amd64 and arm64 with the pinned
   driver package for that architecture.
 
 ## Step 2: Record packet-flow behavior
 
-This step is complete. The isolated topology, automated matrix, observed
-contracts, and retained artifacts are described in
-[Controller Step 2 validation](controller-step2-validation.md).
+The isolated topology, initial automated matrix, observed contracts, and
+retained artifacts are described in
+[Controller Step 2 validation](controller-step2-validation.md). Complete the
+remaining address-mode and WFP-interaction cases before closing this step.
 
 Extend the isolated live-driver harness with a controlled network topology:
 
@@ -80,11 +97,18 @@ Extend the isolated live-driver harness with a controlled network topology:
 1. Run each case for an excluded executable, its descendant, and a non-excluded
    executable.
 1. Repeat the matrix with dual-stack, IPv4-only, and IPv6-only addresses.
+1. Cover all nine address-availability modes documented by the driver, including
+   tunnel-only and Internet-only families. Verify the explicit block and permit
+   behavior; do not treat every incomplete address pair as normal tunnel policy.
 1. Add, replace, and clear exclusions while flows are active.
 1. Replace tunnel and underlay addresses while flows are active.
 1. Record whether each existing flow moves, stops, or keeps its previous policy.
    Then test the policy of a new flow from the same process.
 1. Confirm that traffic does not use an unintended path during each change.
+1. Add restrictive synthetic WFP filters to the caller-owned baseline and DNS
+   sublayers. Verify the driver's permit and block behavior against those
+   filters, including the DNS-sublayer interaction. If this cannot be tested,
+   document it as unqualified behavior.
 1. Repeat the matrix after driver reset and reinitialization.
 
 Do not infer packet behavior from a successful IOCTL. Characterize behavior
@@ -94,222 +118,137 @@ first, review the result, and then convert it into regression assertions.
 
 - The matrix covers TCP and UDP, IPv4 and IPv6, new and existing flows, and
   excluded, descendant, and non-excluded processes.
+- The matrix covers all nine driver address modes, including asymmetric address
+  availability and fail-closed behavior.
 - Packet observations prove the selected path; API return values alone are not
   accepted as evidence.
+- WFP interaction tests prove the documented permit and block behavior, or the
+  release documentation explicitly excludes that behavior from qualification.
 - Address and exclusion changes have documented, repeatable behavior.
 - No test leaks traffic to the unintended tunnel or underlay path.
 - Reset and reinitialization restore the initial behavior without a guest
   rebuild.
 
-## Step 3: Build the deployment component
+## Step 3: Add a minimal tunnel example
 
-Build this component outside the core package:
+Add a Windows-only `cmd/tunneldemo` command that creates a real TUN-backed
+tunnel to a controlled peer and uses the public controller API to apply split
+tunneling. Keep it small and test-oriented. It is an executable usage example,
+not a production VPN client.
 
 ### Step 3 implementation and tests
 
-1. Define a package manifest for each supported architecture.
-1. Record the driver version, source commit, package hashes, signer, controller
-   version, and minimum Windows build.
-1. Verify the package hash, Authenticode signature, signer, version, and
-   architecture before installation.
-1. Add SCM install, start, stop, upgrade, and uninstall operations.
-1. Add an ownership lock and a recoverable cleanup ledger.
-1. Reject unexpected driver state or a device owned by another application.
-1. Unit-test manifest parsing, architecture selection, and version comparison.
-1. Verify rejection of a changed file, an unsigned file, a wrong signer, a wrong
-   architecture, a wrong version, and an incomplete package.
-1. Test fresh installation and the already-installed expected package.
-1. Test restart, same-version repair, supported upgrade, rollback after a failed
-   upgrade, and uninstall.
-1. Inject failure after every state-changing operation. Restart the deployment
-   process and recover from the cleanup ledger.
-1. Test concurrent deployment attempts and an active device owner.
-1. Confirm that uninstall removes only resources recorded as owned.
-
-The existing VM harness verifies its pinned test package, but it is not the
-production deployment component.
+1. Create and configure the TUN adapter, routes, addresses, and required WFP
+   sublayers. Keep ownership of each resource explicit.
+1. Implement the minimum packet transport needed to exchange IPv4 and IPv6
+   traffic with a controlled peer. Document the transport and its security
+   limits; do not describe it as suitable for untrusted networks.
+1. Open and initialize the split-tunnel driver, register the process snapshot,
+   set tunnel and underlay addresses, and configure executable exclusions.
+1. Accept exclusions and tunnel configuration through command-line flags. Make
+   the selected tunnel and bypass paths visible in concise diagnostic output.
+1. Use the controller's event API to keep process registration correct while the
+   command runs.
+1. Demonstrate one non-excluded process using the tunnel and one excluded
+   process, including a descendant, using the underlay.
+1. Shut down workers in order, reset the driver, and remove only the TUN, route,
+   and WFP resources that the command created. Preserve resources needed for
+   recovery if reset fails.
+1. Reject an unexpected driver state or an existing owner without changing its
+   configuration. Do not install, update, stop, or remove the driver.
+1. Add an isolated VM test that runs the command against the controlled peer and
+   proves the path used by TCP and UDP traffic. Do not use the developer's
+   active network or a public service as test evidence.
+1. Document a short, reproducible walkthrough that builds the command, starts
+   the peer, selects an executable exclusion, verifies both paths, and performs
+   cleanup.
 
 ### Step 3 completion gate
 
-- No package reaches SCM before all identity checks pass.
-- Architecture selection works on native amd64 and arm64 systems.
-- Install, repair, restart, upgrade, rollback, and uninstall pass on fresh
-  disposable machines.
-- Recovery succeeds after interruption at every recorded mutation point.
-- Concurrent or foreign ownership produces a clear error and does not change the
-  other owner's service, device, or WFP state.
-- A successful uninstall leaves no owned service, package, lock, or ledger
-  entry. Failed cleanup leaves enough ledger data for the next recovery run.
+- A user can run the documented walkthrough on a prepared Windows test system
+  and observe tunneled and excluded traffic through distinct paths.
+- The command uses only the published library API; it does not depend on test
+  internals or repository-local package replacements.
+- The isolated test proves packet paths independently of controller return
+  values.
+- Normal shutdown leaves no command-owned driver policy, TUN adapter, route, or
+  WFP object behind. Failure output identifies resources that require recovery.
+- The documentation clearly separates the example from a production VPN and
+  lists its security and operational limitations.
 
-## Step 4: Integrate the controller into the service host
+## Step 4: Qualify the library on supported Windows configurations
 
-Implement one service-owned session in this order:
-
-1. Verify and start the pinned signed package.
-1. Create application-owned baseline and DNS sublayers in a non-dynamic WFP
-   session. Commit them before driver initialization.
-1. Create the TUN and configure caller-owned network resources.
-1. Open the driver and require the expected fresh state. Use an explicit
-   recovery path for any other state.
-1. Initialize the driver.
-1. Take and register the process snapshot. Initialization must come first
-   because it starts the process watcher.
-1. Set the TUN and underlying interface addresses.
-1. Set the executable exclusions.
-1. Start event reading and network-change monitoring.
-1. Refresh addresses and exclusions when external state changes. Reconcile state
-   after a timed-out or otherwise uncertain mutation.
-1. On shutdown, stop workers, reset with a fresh cleanup context, and close the
-   device.
-1. Delete referenced WFP objects and other caller-owned resources only after a
-   successful reset. Send reset failures to recovery logic.
-
-Do not use dynamic caller WFP sublayers. Do not hold a caller WFP transaction
-across a driver IOCTL that changes WFP state.
-
-Keep original DOS executable paths in addition to resolved NT paths. Refresh
-them after drive remounts or executable changes. Network executable paths and
-glob rules remain unsupported.
+Run the controller lifecycle and packet-flow suites on each supported
+architecture and Windows version.
 
 ### Step 4 tests
 
-1. Unit-test the service state machine with failures before and after every
-   setup and teardown operation.
-1. Run the complete lifecycle in the disposable live-driver VM.
-1. Exit the service after WFP creation, TUN creation, open, initialize, process
-   registration, address configuration, and exclusion configuration. Restart it
-   and verify recovery.
-1. Test an empty and a partial process snapshot. Preserve warnings without
-   assigning a recycled parent PID to the wrong process.
-1. Start processes before the snapshot, during registration, and after
-   configuration. Verify that none are lost from classification.
-1. Block an event read while addresses and exclusions change.
-1. Test a second service instance and an existing foreign driver owner.
-1. Force reset failure. Confirm that referenced WFP objects remain and the
-   ledger retains enough information for recovery.
-1. Remount a drive or replace an executable and verify path refresh from the
-   stored DOS path.
-1. Stop the service during active events and control operations.
+1. Define the proposed support matrix before qualification starts.
+1. Record the OS build, architecture, driver identity, and controller revision.
+1. Run native unit, live-driver, packet-flow, cancellation, and lifecycle tests
+   on each matrix entry.
+1. Run an extended controller session with repeated configuration changes and
+   event cancellation.
+1. Save driver verification results, test results, logs, and resource
+   measurements as qualification evidence.
 
 ### Step 4 completion gate
 
-- The state-machine tests cover every transition and cleanup edge.
-- The live session reaches ready state and shuts down cleanly from every
-  completed startup phase.
-- Successful shutdown leaves no controller handle, worker, referenced WFP
-  object, TUN, route, or DNS setting owned by the session.
-- Failed reset preserves referenced resources and produces an actionable
-  recovery record.
-- Process startup races do not leave an unclassified process.
-- A second or foreign owner is not reset, stopped, or reconfigured.
-- Path refresh updates exclusions without losing the user's original path.
-
-## Step 5: Add operational recovery
-
-Add diagnostics, bounded retries, and explicit recovery. Test each condition:
-
-### Step 5 tests
-
-1. Sleep and resume.
-1. Base Filtering Engine restart.
-1. Service or user-process crash.
-1. Driver failure.
-1. Adapter and default-route changes.
-1. Repeated service start and stop.
-1. Loss and restoration of IPv4, IPv6, and dual-stack connectivity.
-1. Drive remount and executable replacement while an exclusion is active.
-1. Corrupt or incomplete cleanup ledger data.
-1. Retry exhaustion and service restart after exhaustion.
-
-For every case, record detection time, retry count, recovery time, final driver
-state, final network state, and retained owned resources. Run repeated
-start-and-stop and suspend-and-resume loops to expose cumulative leaks.
-
-### Step 5 completion gate
-
-- Each fault either restores the documented ready state within a configured
-  bound or enters one stable failure state with an actionable diagnostic.
-- Retries are bounded and do not form a busy loop.
-- Recovery does not delete or reconfigure resources owned by another
-  application.
-- A service restart can continue recovery from every retained ledger state.
-- Event readers, controller handles, WFP objects, adapters, routes, and DNS
-  settings do not show cumulative growth across repeated loops.
-- Network changes result in the expected address and path refresh.
-
-## Step 6: Qualify supported Windows configurations
-
-Run the deployment, lifecycle, traffic, and recovery suites on each supported
-architecture and Windows version. Include systems with Secure Boot and Memory
-Integrity enabled.
-
-### Step 6 tests
-
-1. Define the proposed support matrix before qualification starts.
-1. Start each matrix entry from a clean Windows installation.
-1. Record the OS build, architecture, firmware mode, Secure Boot state, Memory
-   Integrity state, driver package identity, and controller revision.
-1. Run deployment, service lifecycle, packet-flow, fault-recovery, restart, and
-   uninstall tests on each entry.
-1. Reboot after installation and during retained recovery state.
-1. Run an extended session with repeated configuration changes and event
-   cancellation.
-1. Save logs, package verification results, test results, and final cleanup
-   checks as qualification evidence.
-
-### Step 6 completion gate
-
 - Every advertised matrix entry has a successful native run with the exact
-  pinned Mullvad-signed package.
-- Secure Boot and Memory Integrity are measured as enabled for entries that
-  claim them; configuration intent is not sufficient evidence.
-- Each entry passes install through uninstall, including traffic and recovery
-  tests.
-- Reboot and extended-session tests do not produce persistent leaks or stale
-  policy.
+  pinned Mullvad-signed driver files.
+- Controller lifecycle and packet-flow tests pass on amd64 and arm64.
+- Extended controller sessions do not leak handles or goroutines and do not
+  leave stale driver policy after a successful reset.
 - Failed matrix entries are fixed and rerun, or removed from the support matrix.
   Cross-build results alone do not qualify a platform.
 
-## Step 7: Prepare the first public release
+## Step 5: Prepare the first public library release
 
-### Step 7 tests
+### Step 5 tests
 
 1. Define the stable API and support matrix.
-1. Build a clean consumer program from the published module interface and run
-   its basic lifecycle on a qualified system.
+1. Build a clean example program from the published module interface and run the
+   controller lifecycle on a qualified system.
 1. Run all portable, fuzz, cross-build, native, live-driver, traffic,
-   deployment, and recovery gates from the release revision.
+   cancellation, and lifecycle gates from the release revision.
 1. Run vulnerability, license, module-integrity, formatting, lint, and vet
    checks.
-1. Complete notices, API documentation, lifecycle examples, and recovery
-   instructions.
-1. Build release artifacts from a clean checkout. Record their hashes and verify
-   them on a second clean machine.
+1. Complete notices, API documentation, lifecycle examples, and controller
+   error-handling guidance.
+1. Build and run `cmd/tunneldemo` from the published module interface on a
+   qualified system. Confirm that the documented split-tunnel demonstration
+   still works.
+1. Document the controller's 16 MiB buffer limit, 65,536-record limit, exact
+   path behavior, and unsupported UNC resolver paths.
+1. Document the upstream DNS, localhost UDP, and multicast limitations.
+1. Remove stale `starter` and `future sysnet-windows` wording from package and
+   example documentation.
+1. Review the `golang.org/x/sys` version and either update it or record why the
+   existing pin is retained.
+1. Verify the module from a clean checkout and from a separate Go module.
 1. Check that documentation does not advertise untested capabilities or
    platforms.
-1. Confirm that the release uses only the approved pinned Mullvad-signed driver
-   packages.
+1. Confirm that live tests use only the approved pinned Mullvad-signed driver
+   files.
 
-### Step 7 completion gate
+### Step 5 completion gate
 
 - All required gates pass from the exact release revision.
-- The clean consumer test passes without repository-local paths or uncommitted
+- The clean example test passes without repository-local paths or uncommitted
   files.
-- Release artifacts are reproducible through the documented build process and
-  match their published hashes.
-- Notices cover the module and dependencies, and the documentation records the
-  external driver package provenance.
-- The support matrix links to the qualification evidence from Step 6.
-- Known limitations and recovery actions are documented.
+- The published module contains the documented packages and no unintended files.
+- Notices cover the module and its dependencies, and the documentation records
+  the external driver provenance used for live tests.
+- The support matrix links to the qualification evidence from Step 4.
+- The minimal tunnel walkthrough passes from the release revision and uses only
+  documented public APIs.
+- Known controller limitations and error-handling requirements are documented.
 - No release documentation claims untested driver behavior or a platform without
   native evidence.
 
 ## Protocol references
 
 Protocol authority remains `src/defs/ioctl.h`, `src/procmgmt/procmgmt.cpp`, and
-`src/firewall/firewall.cpp` in the [pinned upstream source][upstream]. The
-upstream production controller is also useful for lifecycle comparisons:
-[Mullvad Windows controller][mullvad-app].
+`src/firewall/firewall.cpp` in the [pinned upstream source][upstream].
 
-[mullvad-app]: https://github.com/mullvad/mullvadvpn-app/tree/643a4cd
 [upstream]: https://github.com/mullvad/win-split-tunnel/tree/0a0eb97

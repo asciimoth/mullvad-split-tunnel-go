@@ -52,6 +52,9 @@ try {
             'TestEventCancellationStress',
             'TestEventCancellationWhileControllerCloses',
             'TestHardLinkAndAlternateLaunchPaths',
+            'TestSnapshotRegistrationReplaysProcessChanges',
+            'TestArrivalAndDepartureEventReasons',
+            'TestResetCompletesPendingEventRead',
             'TestInjectedSetupFailureRecovery'
         )
     }
