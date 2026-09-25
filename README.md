@@ -11,6 +11,7 @@ host.
 ## Repository contents
 
 - [Controller implementation plan](docs/mullvad-controller-plan.md)
+- [Minimal tunnel demonstration](docs/tunneldemo.md)
 - Controller source, diagnostic command, lifecycle example, protocol fixtures,
   tests, and CI workflow.
 
@@ -27,8 +28,10 @@ host.
 - C++ fixtures from pinned upstream headers, plus protocol, lifecycle, fuzz, and
   Windows helper tests.
 
-It does not install the driver, create WFP sublayers, create a TUN, change
-routes or DNS, monitor adapters, or implement a kill switch.
+The library does not install the driver, create WFP sublayers, create a TUN,
+change routes or DNS, monitor adapters, or implement a kill switch. The
+Windows-only `cmd/tunneldemo` executable owns these resources for its isolated
+example session; these facilities are not part of the library API.
 
 ## Development environment
 

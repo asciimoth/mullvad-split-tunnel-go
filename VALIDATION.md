@@ -66,14 +66,20 @@ VirtIO media and the pinned signed driver 1.3.0.0:
   launch uses its separate hard-link path and needs a separate exclusion.
 - Recovery passes after setup exits at the WFP, open, initialize, register, and
   configure phases. The driver service is stopped after the gate.
-- The isolated two-guest flow gate validates 1,472 packet observations. It
-  covers TCP and UDP, IPv4 and IPv6, request-response and long-lived flows, all
-  three process roles, all nine driver address modes, restrictive filters in the
-  baseline and DNS sublayers, active configuration and address changes, and a
-  complete reset and reinitialization cycle.
+- The isolated two-guest flow gate validates 1,484 packet observations. Its
+  first 1,472 observations cover TCP and UDP, IPv4 and IPv6, request-response
+  and long-lived flows, all three process roles, all nine driver address modes,
+  restrictive filters in the baseline and DNS sublayers, active configuration
+  and address changes, and a complete reset and reinitialization cycle.
+- The other 12 observations run `cmd/tunneldemo` with a real Wintun adapter and
+  controlled peer. Included traffic uses the encapsulated path. An exact
+  exclusion and its descendant use the direct underlay. The command returns the
+  driver to `Started`, removes its adapter, and rejects a competing owner before
+  it creates resources.
 - Link captures confirm every selected path and reject markers on the opposite
   link. The observed change contracts are recorded in
-  [Controller Step 2 validation](docs/controller-step2-validation.md).
+  [Controller Step 2 validation](docs/controller-step2-validation.md) and
+  [Controller Step 3 validation](docs/controller-step3-validation.md).
 
 The workflow now runs the native unit and signed-driver suites on Windows amd64
 and arm64 GitHub-hosted runners. Native arm64 execution has not run in this
@@ -128,8 +134,8 @@ just test-windows-flow
 
 The live gate exercises initialization, process registration, addresses,
 configuration, queries, events, cancellation, reset, Unicode paths, descendants,
-and rule changes. The separate flow gate covers packet paths and controlled
-adapter-address changes.
+and rule changes. The separate flow gate covers packet paths, controlled
+adapter-address changes, and the Wintun-backed tunnel example.
 
 Live-driver tests remain separate from ordinary `go test ./...`. They are part
 of the explicit `test-total` gate. Neither unit tests nor the diagnostic command

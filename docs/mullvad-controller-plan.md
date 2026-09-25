@@ -128,6 +128,11 @@ first, review the result, and then convert it into regression assertions.
 
 ## Step 3: Add a minimal tunnel example
 
+This step is implemented. The command, controlled peer, isolated regression
+gate, resource contracts, and walkthrough are described in
+[Controller Step 3 validation](controller-step3-validation.md) and
+[Minimal tunnel demonstration](tunneldemo.md).
+
 Add a Windows-only `cmd/tunneldemo` command that creates a real TUN-backed
 tunnel to a controlled peer and uses the public controller API to apply split
 tunneling. Keep it small and test-oriented. It is an executable usage example,

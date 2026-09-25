@@ -19,6 +19,9 @@ drivers, libraries, or sources.
   upstream checkout. Retain upstream notices if you redistribute those headers.
 - golang.org/x/sys v0.44.0 is an external dependency under the Go project's
   BSD-style license. It is referenced through go.mod, not vendored.
+- golang.zx2c4.com/wintun provides MIT-licensed Go bindings used only by the
+  tunnel example. The separately downloaded official Wintun DLL includes its own
+  distribution license. No Wintun binary is committed to the Go module.
 
 [driver-binaries]: https://github.com/mullvad/mullvadvpn-app-binaries/commit/5b6f46cde692acb77ee74b37b9fd3f1678c45a52
 [upstream]: https://github.com/mullvad/win-split-tunnel/tree/0a0eb97

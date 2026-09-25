@@ -81,7 +81,7 @@
             src = ./.;
             proxyVendor = true;
             modPostBuild = "go mod tidy";
-            vendorHash = "sha256-W30d2csXBFVi3857waoWZFFDWJkdd9eU2x1OueKij7k=";
+            vendorHash = "sha256-G3Tn3Abrp8U8QtFkTbpQ+1C0BfMzdjJ3mxFlyi8u3qM=";
           }).goModules;
 
         offlineGo =

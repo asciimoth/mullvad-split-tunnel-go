@@ -34,6 +34,7 @@ try {
         $timeout = '20m'
         $runPattern = '^TestPacketFlow'
         $env:FLOW_ARTIFACT_DIR = $ArtifactDir
+        $env:TUNNELDEMO_EXE = Join-Path (Split-Path $SourceDir -Parent) 'tunneldemo.exe'
     }
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -45,7 +46,7 @@ try {
     if ($testExitCode -ne 0) { throw "live-driver tests failed with exit code $testExitCode" }
     $events = @(Get-Content (Join-Path $ArtifactDir 'e2e-events.jsonl') | Where-Object { $_ -match '^\s*\{' } | ConvertFrom-Json)
     if ($Flow) {
-        $required = @('TestPacketFlowCharacterization')
+        $required = @('TestPacketFlowCharacterization', 'TestPacketFlowTunnelDemo')
     } else {
         $required = @(
             'TestDriverLifecycle',

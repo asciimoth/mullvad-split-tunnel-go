@@ -90,6 +90,34 @@ class FlowPcapTest(unittest.TestCase):
                 self.assertIn("expected", result.stderr)
                 self.assertFalse(evidence[0]["packetPathValid"])
 
+    def test_accepts_tunneldemo_encapsulation_and_preserves_metadata(self):
+        observations = [
+            {
+                "token": "TUNNELDEMO_INCLUDED",
+                "phase": "tunneldemo",
+                "role": "included",
+                "network": "tcp4",
+                "expectedPath": "tunnel",
+            },
+            {
+                "token": "TUNNELDEMO_DESCENDANT",
+                "phase": "tunneldemo",
+                "role": "descendant",
+                "network": "udp6",
+                "expectedPath": "underlay",
+            },
+        ]
+        result, evidence = self.run_validator(
+            observations,
+            tunnel=b"udp-header MSTD\x01\x00\x00\x00 inner TUNNELDEMO_INCLUDED",
+            underlay=b"direct-ip TUNNELDEMO_DESCENDANT",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(evidence[0]["phase"], "tunneldemo")
+        self.assertEqual(evidence[0]["role"], "included")
+        self.assertEqual(evidence[1]["network"], "udp6")
+        self.assertTrue(all(value["packetPathValid"] for value in evidence))
+
     def test_rejects_empty_manifest(self):
         result, evidence = self.run_validator("\n")
         self.assertNotEqual(result.returncode, 0)

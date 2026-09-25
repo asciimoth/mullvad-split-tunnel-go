@@ -2,11 +2,15 @@
 set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 root=$(cd -- "$script_dir/../.." && pwd -P)
+# shellcheck source=dev/winvm/common.sh
+source "$script_dir/common.sh"
 tmp=$(mktemp -d); trap 'find "$tmp" -depth -delete' EXIT
 "$script_dir/doctor.sh" --validate >/dev/null
 python3 -m py_compile "$script_dir/tools/qga.py"
 python3 -m py_compile "$script_dir/tools/flow-pcap.py"
+python3 -m py_compile "$script_dir/tools/tunneldemo-input.py"
 python3 "$script_dir/tests/test_flow_pcap.py"
+python3 "$script_dir/tests/test_tunneldemo_input.py"
 shellcheck "$script_dir"/*.sh "$script_dir/tests"/*.sh
 
 # Test commands retain JSON events while formatting their console output.
@@ -15,11 +19,52 @@ grep -Fq 'Tee-Object -FilePath' "$script_dir/e2e.ps1"
 grep -Fq '        Format-GoTestOutput' "$script_dir/test.ps1"
 grep -Fq '        Format-GoTestOutput' "$script_dir/e2e.ps1"
 grep -Fq 'Expected two IPv4/IPv6 listeners on ports 53 and 47823' "$script_dir/run.sh"
+grep -Fq "'TestPacketFlowTunnelDemo'" "$script_dir/e2e.ps1"
+grep -Fq 'TUNNELDEMO_EXE' "$script_dir/e2e.ps1"
+grep -Fq 'tunneldemo-input.py' "$script_dir/run.sh"
+grep -Fq 'tunnelDemoLockHash' "$script_dir/run.sh"
 
 # Hash checks fail closed.
 printf data >"$tmp/input"
 if WINVM_CACHE_DIR="$tmp/cache" bash -c "source '$script_dir/common.sh'; verify_hash fixture '$tmp/input' '0000000000000000000000000000000000000000000000000000000000000000'" 2>/dev/null; then
     printf 'invalid hash was accepted\n' >&2; exit 1
+fi
+
+# The tunnel-demo downloader validates its lock, replaces corrupt cache data,
+# reuses valid data without a network call, and never publishes a bad download.
+download_source="$tmp/wintun-source.zip"; printf wintun-fixture >"$download_source"
+download_hash=$(sha256_file "$download_source")
+download_lock="$tmp/tunneldemo-lock.json"
+jq -n --arg hash "$download_hash" '{schemaVersion:1,wintun:{version:"0.14.1",file:"wintun-0.14.1.zip",source:"https://www.wintun.net/builds/wintun-0.14.1.zip",sha256:$hash}}' >"$download_lock"
+mkdir "$tmp/fake-bin"
+printf '#!%s\n' "$(command -v bash)" >"$tmp/fake-bin/curl"
+cat >>"$tmp/fake-bin/curl" <<'SH'
+set -euo pipefail
+[[ ${FAKE_CURL_FAIL:-0} == 0 ]] || exit 90
+output=''
+while (($#)); do
+    if [[ $1 == --output ]]; then output=$2; shift 2; else shift; fi
+done
+[[ -n $output ]]
+cp -- "$FAKE_CURL_SOURCE" "$output"
+SH
+chmod +x "$tmp/fake-bin/curl"
+download_cache="$tmp/download-cache"
+download_command="source '$script_dir/common.sh'; source '$script_dir/tunneldemo-input.sh'; prepare_tunneldemo_archive '$download_lock'; printf '%s' \"\$wintun_archive\""
+archive=$(PATH="$tmp/fake-bin:$PATH" WINVM_CACHE_DIR="$download_cache" FAKE_CURL_SOURCE="$download_source" bash -c "$download_command")
+cmp "$download_source" "$archive"
+PATH="$tmp/fake-bin:$PATH" WINVM_CACHE_DIR="$download_cache" FAKE_CURL_FAIL=1 bash -c "$download_command" >/dev/null
+printf corrupt >"$archive"
+archive=$(PATH="$tmp/fake-bin:$PATH" WINVM_CACHE_DIR="$download_cache" FAKE_CURL_SOURCE="$download_source" bash -c "$download_command")
+cmp "$download_source" "$archive"
+printf different >"$tmp/wrong-download.zip"
+find "$archive" -maxdepth 0 -type f -delete
+if PATH="$tmp/fake-bin:$PATH" WINVM_CACHE_DIR="$download_cache" FAKE_CURL_SOURCE="$tmp/wrong-download.zip" bash -c "$download_command" >/dev/null 2>&1; then
+    printf 'invalid Wintun download was accepted\n' >&2; exit 1
+fi
+[[ ! -e $archive ]]
+if find "$download_cache/inputs" -maxdepth 1 -name '*.partial.*' -print -quit | grep -q .; then
+    printf 'failed Wintun download left a partial file\n' >&2; exit 1
 fi
 
 # Dirty worktrees contain each eligible file once and omit private files.
@@ -39,6 +84,7 @@ key_copy="$tmp/key-repo"; mkdir -p "$key_copy/dev"; cp -R "$script_dir" "$key_co
 key_cache="$tmp/key-cache"; mkdir -p "$key_cache/ssh"; printf 'ssh-ed25519 fixture-one\n' >"$key_cache/ssh/id_ed25519.pub"
 key_env=(PATH="$tmp/bin:$PATH" WINVM_CACHE_DIR="$key_cache" WINVM_OVMF_CODE="$tmp/code.fd" WINVM_OVMF_VARS="$tmp/vars.fd")
 first=$(env "${key_env[@]}" "$key_copy/dev/winvm/doctor.sh" --base-key)
+printf '\n' >>"$key_copy/dev/winvm/tunneldemo-lock.json"; runtime_only=$(env "${key_env[@]}" "$key_copy/dev/winvm/doctor.sh" --base-key); [[ $first == "$runtime_only" ]]
 printf '\n# test-only\n' >>"$key_copy/dev/winvm/test.ps1"; second=$(env "${key_env[@]}" "$key_copy/dev/winvm/doctor.sh" --base-key); [[ $first == "$second" ]]
 printf '\n# image input\n' >>"$key_copy/dev/winvm/provision.ps1"; third=$(env "${key_env[@]}" "$key_copy/dev/winvm/doctor.sh" --base-key); [[ $first != "$third" ]]
 printf 'ssh-ed25519 fixture-two\n' >"$key_cache/ssh/id_ed25519.pub"; fourth=$(env "${key_env[@]}" "$key_copy/dev/winvm/doctor.sh" --base-key); [[ $third != "$fourth" ]]
@@ -63,8 +109,7 @@ socket_dir=$(XDG_RUNTIME_DIR="$tmp" bash -c "source '$script_dir/common.sh'; mak
 # A child that ignores SIGTERM is killed and reaped within the bound.
 ready="$tmp/ready"; python3 -c 'import signal,sys,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); open(sys.argv[1],"w").close(); time.sleep(60)' "$ready" & stubborn=$!
 for _ in {1..100}; do [[ -f $ready ]] && break; sleep .01; done
-# shellcheck source=dev/winvm/common.sh
-source "$script_dir/common.sh"; stop_and_reap_pid "$stubborn" 0 1 2
+stop_and_reap_pid "$stubborn" 0 1 2
 if kill -0 "$stubborn" 2>/dev/null; then printf 'stubborn process survived cleanup\n' >&2; exit 1; fi
 
 # The final deadline does not fall through to an unbounded wait.

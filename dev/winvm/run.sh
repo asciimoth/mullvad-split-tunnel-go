@@ -5,6 +5,8 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=dev/winvm/common.sh
 source "$script_dir/common.sh"
+# shellcheck source=dev/winvm/tunneldemo-input.sh
+source "$script_dir/tunneldemo-input.sh"
 mode=${1:-baseline}; shell_path=''
 case $mode in baseline|e2e|flow) ;; --shell) mode=shell; shell_path=${2:?usage: run.sh --shell RUN};; --clean) mode=clean;; *) die "unknown mode: $mode";; esac
 artifact_root=$(realpath -m "$repo_root/$(jq -r .artifacts.directory "$config_file")")
@@ -17,9 +19,13 @@ if [[ $mode == clean ]]; then
     while IFS= read -r -d '' path; do resolved=$(realpath -e "$path"); [[ $resolved == "$artifact_root"/run-* ]] || die "unsafe cleanup target: $resolved"; find "$resolved" -depth -delete; done < <(find "$artifact_root" -mindepth 1 -maxdepth 1 -type d -name 'run-*' -print0)
     printf 'Removed validated VM runs. The base image was kept.\n'; exit
 fi
-for command in qemu-system-x86_64 qemu-img ssh scp jq python3 timeout flock git tar; do require_command "$command"; done
+for command in qemu-system-x86_64 qemu-img ssh scp jq python3 timeout flock git tar curl; do require_command "$command"; done
 [[ -r /dev/kvm && -w /dev/kvm ]] || die '/dev/kvm is not accessible; run just winvm-doctor'
 ensure_cache_dir; mkdir -p "$artifact_root" "$winvm_cache_dir/locks"; chmod 0700 "$artifact_root"
+if [[ $mode == flow ]]; then
+    wintun_lock="$script_dir/tunneldemo-lock.json"
+    prepare_tunneldemo_archive "$wintun_lock"
+fi
 # One active VM per host prevents memory and CPU oversubscription from making
 # boot and driver timing nondeterministic. The bounded flock also avoids hangs.
 exec 6>"$winvm_cache_dir/locks/vm-run.lock"
@@ -113,7 +119,8 @@ cleanup() {
 trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 if [[ $mode != shell ]]; then
     revision=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf unknown); dirty=false; [[ -n $(git -C "$repo_root" status --porcelain) ]] && dirty=true
-    jq -n --arg revision "$revision" --argjson dirty "$dirty" --arg key "$key" --arg mode "$mode" --arg started "$(date -u +%FT%TZ)" --arg testHash "$(sha256_file "$script_dir/test.ps1")" --arg e2eHash "$(sha256_file "$script_dir/e2e.ps1")" --arg runnerHash "$(sha256_file "$script_dir/run.sh")" '{revision:$revision,dirty:$dirty,baseImageKey:$key,mode:$mode,startedAt:$started,status:"running",stage:"setup",scriptHashes:{test:$testHash,e2e:$e2eHash,runner:$runnerHash}}' >"$run_dir/run.json"
+    tunnel_demo_lock_hash=''; [[ $mode != flow ]] || tunnel_demo_lock_hash=$(sha256_file "$wintun_lock")
+    jq -n --arg revision "$revision" --argjson dirty "$dirty" --arg key "$key" --arg mode "$mode" --arg started "$(date -u +%FT%TZ)" --arg testHash "$(sha256_file "$script_dir/test.ps1")" --arg e2eHash "$(sha256_file "$script_dir/e2e.ps1")" --arg runnerHash "$(sha256_file "$script_dir/run.sh")" --arg tunnelDemoLockHash "$tunnel_demo_lock_hash" '{revision:$revision,dirty:$dirty,baseImageKey:$key,mode:$mode,startedAt:$started,status:"running",stage:"setup",scriptHashes:{test:$testHash,e2e:$e2eHash,runner:$runnerHash,tunnelDemoLock:$tunnelDemoLockHash}}' >"$run_dir/run.json"
     cp "$manifest" "$run_dir/image-manifest.json"; qemu-img create -q -f qcow2 -F qcow2 -b "$base" "$overlay"
     if [[ $mode == flow ]]; then qemu-img create -q -f qcow2 -F qcow2 -b "$base" "$endpoint_overlay"; fi
 fi
@@ -169,13 +176,18 @@ stage=transfer; ssh "${ssh_opts[@]}" "$target" "powershell.exe -NoProfile -Comma
 if [[ $mode == flow ]]; then
     stage=flow-setup
     GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o "$run_dir/flowecho.exe" "$repo_root/cmd/flowecho"
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o "$run_dir/tunnelpeer.exe" "$repo_root/cmd/tunnelpeer"
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o "$run_dir/tunneldemo.exe" "$repo_root/cmd/tunneldemo"
+    python3 "$script_dir/tools/tunneldemo-input.py" --lock "$wintun_lock" --archive "$wintun_archive" --architecture amd64 --output "$run_dir/wintun.dll"
+    [[ -s $run_dir/wintun.dll ]] || die 'Wintun amd64 DLL is absent from the locked archive'
     endpoint_remote="C:/winvm/runs/${run_id//[^A-Za-z0-9-]/}"; ssh "${endpoint_ssh_opts[@]}" "$endpoint_target" "powershell.exe -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$endpoint_remote'|Out-Null\""
-    scp "${endpoint_scp_opts[@]}" "$run_dir/flowecho.exe" "$script_dir/flow-network.ps1" "$endpoint_target:$endpoint_remote/" >/dev/null
+    scp "${endpoint_scp_opts[@]}" "$run_dir/flowecho.exe" "$run_dir/tunnelpeer.exe" "$script_dir/flow-network.ps1" "$endpoint_target:$endpoint_remote/" >/dev/null
     endpoint_windows=${endpoint_remote//\//\\}
     "$script_dir/tools/qga.py" --socket "$endpoint_qga" --timeout 60 exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$endpoint_windows\\flow-network.ps1" -Role Endpoint >"$run_dir/endpoint-network.json"
-    "$script_dir/tools/qga.py" --socket "$endpoint_qga" --timeout 30 exec powershell.exe -NoProfile -Command "Set-NetFirewallProfile -All -Enabled False; Start-Sleep -Seconds 3; \$action=New-ScheduledTaskAction -Execute '$endpoint_windows\\flowecho.exe'; Register-ScheduledTask -TaskName SplitTunnelFlowEndpoint -Action \$action -User SYSTEM -RunLevel Highest -Force | Out-Null; Start-ScheduledTask -TaskName SplitTunnelFlowEndpoint; Start-Sleep -Seconds 2; \$listeners=@(Get-NetTCPConnection -State Listen | Where-Object LocalPort -in 53,47823); if (@(\$listeners | Where-Object LocalPort -eq 53).Count -ne 2 -or @(\$listeners | Where-Object LocalPort -eq 47823).Count -ne 2) { throw 'Expected two IPv4/IPv6 listeners on ports 53 and 47823' }; \$listeners | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json" >"$run_dir/endpoint-service.json"
+    "$script_dir/tools/qga.py" --socket "$endpoint_qga" --timeout 30 exec powershell.exe -NoProfile -Command "Set-NetFirewallProfile -All -Enabled False; Start-Sleep -Seconds 3; \$action=New-ScheduledTaskAction -Execute '$endpoint_windows\\flowecho.exe'; Register-ScheduledTask -TaskName SplitTunnelFlowEndpoint -Action \$action -User SYSTEM -RunLevel Highest -Force | Out-Null; Start-ScheduledTask -TaskName SplitTunnelFlowEndpoint; \$peer=New-ScheduledTaskAction -Execute '$endpoint_windows\\tunnelpeer.exe' -Argument '-listen 198.18.0.1:51900'; Register-ScheduledTask -TaskName SplitTunnelDemoPeer -Action \$peer -User SYSTEM -RunLevel Highest -Force | Out-Null; Start-ScheduledTask -TaskName SplitTunnelDemoPeer; Start-Sleep -Seconds 2; \$listeners=@(Get-NetTCPConnection -State Listen | Where-Object LocalPort -in 53,47823); if (@(\$listeners | Where-Object LocalPort -eq 53).Count -ne 2 -or @(\$listeners | Where-Object LocalPort -eq 47823).Count -ne 2) { throw 'Expected two IPv4/IPv6 listeners on ports 53 and 47823' }; if (-not (Get-NetUDPEndpoint -LocalAddress 198.18.0.1 -LocalPort 51900)) { throw 'Tunnel demo peer is not listening' }; \$listeners | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json" >"$run_dir/endpoint-service.json"
     guest_remote=${remote//\//\\}
     "$script_dir/tools/qga.py" --socket "$qga" --timeout 60 exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$guest_remote\\source\\dev\\winvm\\flow-network.ps1" -Role Client >"$run_dir/client-network.json"
+    scp "${scp_opts[@]}" "$run_dir/tunneldemo.exe" "$run_dir/wintun.dll" "$target:$remote/" >/dev/null
 fi
 stage='test'; test_timeout=$(jq -r .machine.testTimeoutSeconds "$config_file"); set +e
 printf 'Running the Windows %s gate with a %d-minute timeout...\n' "$mode" "$((test_timeout/60))"
