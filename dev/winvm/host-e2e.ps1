@@ -112,6 +112,10 @@ try {
         }
     }
     if ((Get-Content $resultFile -Raw).Trim() -ne '0') {
+        $errorLog = Join-Path $ArtifactDir 'system-e2e-error.log'
+        if (Test-Path $errorLog) {
+            Write-Host (Get-Content $errorLog -Raw)
+        }
         throw 'Native live-driver gate failed; inspect its artifacts'
     }
 } finally {

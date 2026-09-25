@@ -30,6 +30,21 @@ type resourceCounts struct {
 	goroutines int
 }
 
+func resourcesGrowPersistently(measurements []resourceCounts) bool {
+	if len(measurements) < 2 {
+		return false
+	}
+	first := measurements[0]
+	last := measurements[len(measurements)-1]
+	handlesGrow := last.handles > first.handles+2
+	goroutinesGrow := last.goroutines > first.goroutines+2
+	for i := 1; i < len(measurements); i++ {
+		handlesGrow = handlesGrow && measurements[i].handles > measurements[i-1].handles
+		goroutinesGrow = goroutinesGrow && measurements[i].goroutines > measurements[i-1].goroutines
+	}
+	return handlesGrow || goroutinesGrow
+}
+
 func processResourceCounts(t *testing.T) resourceCounts {
 	t.Helper()
 	handle, _, _ := getCurrentProcess.Call()
@@ -65,9 +80,28 @@ func TestDriverLifecycle(t *testing.T) {
 		measurements = append(measurements, counts)
 		t.Logf("complete session %d: handles=%d goroutines=%d", iteration+1, counts.handles, counts.goroutines)
 	}
-	first, last := measurements[0], measurements[len(measurements)-1]
-	if last.handles > first.handles+2 || last.goroutines > first.goroutines+2 {
+	if resourcesGrowPersistently(measurements) {
 		t.Fatalf("complete sessions show persistent resource growth: measurements=%+v", measurements)
+	}
+}
+
+func TestResourcesGrowPersistently(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		measurements []resourceCounts
+		want         bool
+	}{
+		{name: "stable", measurements: []resourceCounts{{100, 2}, {100, 2}, {100, 2}, {100, 2}}},
+		{name: "tolerated drift", measurements: []resourceCounts{{100, 2}, {101, 3}, {102, 4}}},
+		{name: "handle initialization plateaus", measurements: []resourceCounts{{100, 2}, {106, 2}, {108, 2}, {108, 2}}},
+		{name: "handles grow", measurements: []resourceCounts{{100, 2}, {101, 2}, {102, 2}, {103, 2}}, want: true},
+		{name: "goroutines grow", measurements: []resourceCounts{{100, 2}, {100, 3}, {100, 4}, {100, 5}}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := resourcesGrowPersistently(test.measurements); got != test.want {
+				t.Fatalf("resourcesGrowPersistently(%+v) = %v, want %v", test.measurements, got, test.want)
+			}
+		})
 	}
 }
 
@@ -330,8 +364,7 @@ func TestEventCancellationStress(t *testing.T) {
 		t.Logf("cancellation batch %d/%d: cycles=%d handles=%d goroutines=%d",
 			batch+1, batches, (batch+1)*perBatch, counts.handles, counts.goroutines)
 	}
-	last := measurements[len(measurements)-1]
-	if last.handles > baseline.handles+2 || last.goroutines > baseline.goroutines+2 {
+	if resourcesGrowPersistently(append([]resourceCounts{baseline}, measurements...)) {
 		t.Fatalf("cancellation stress shows persistent resource growth: baseline=%+v batches=%+v", baseline, measurements)
 	}
 }

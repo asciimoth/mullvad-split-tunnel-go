@@ -75,7 +75,11 @@ cleanup() {
         printf 'winvm: QEMU survived cleanup; retaining VM disks and sockets\n' >&2
     fi
     if ((vm_stopped)); then remove_socket_dir "$sockets"; fi
-    if [[ $mode != shell && -f $run_dir/run.json ]]; then jq --argjson exit "$status" --arg stage "$stage" --arg finished "$(date -u +%FT%TZ)" '.exitStatus=$exit|.status=(if $exit==0 then "passed" else "failed" end)|.stage=$stage|.finishedAt=$finished' "$run_dir/run.json" >"$run_dir/run.json.new" && mv "$run_dir/run.json.new" "$run_dir/run.json" || true; fi
+    if [[ $mode != shell && -f $run_dir/run.json ]]; then
+        if jq --argjson exit "$status" --arg stage "$stage" --arg finished "$(date -u +%FT%TZ)" '.exitStatus=$exit|.status=(if $exit==0 then "passed" else "failed" end)|.stage=$stage|.finishedAt=$finished' "$run_dir/run.json" >"$run_dir/run.json.new"; then
+            mv "$run_dir/run.json.new" "$run_dir/run.json"
+        fi
+    fi
     if ((success && vm_stopped)); then safe_remove; find "$vars" -maxdepth 0 -type f -delete; elif [[ $mode != shell ]]; then printf '%s\n' "$stage" >"$run_dir/failure-stage.txt"; if ((vm_stopped)) && [[ $(jq -r .artifacts.retainFailedOverlay "$config_file") != true ]]; then safe_remove; else printf 'Retained failed overlay. Diagnose with: just winvm-shell %q\n' "$run_dir" >&2; fi; fi
     exit "$status"
 }
