@@ -65,6 +65,10 @@ evidence is stored with each Windows CI run.
 
 ## Step 2: Record packet-flow behavior
 
+This step is complete. The isolated topology, automated matrix, observed
+contracts, and retained artifacts are described in
+[Controller Step 2 validation](controller-step2-validation.md).
+
 Extend the isolated live-driver harness with a controlled network topology:
 
 ### Step 2 tests

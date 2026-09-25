@@ -59,6 +59,9 @@ test-windows-vm:
 test-windows-e2e:
     dev/winvm/run.sh e2e
 
+test-windows-flow:
+    dev/winvm/run.sh flow
+
 winvm-shell run:
     dev/winvm/run.sh --shell "{{run}}"
 
@@ -69,7 +72,7 @@ winvm-check:
     if [[ "${OS:-}" == "Windows_NT" || "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]]; then printf 'Skipping Linux-only Windows VM host checks.\n'; else dev/winvm/tests/host-scripts.sh; fi
 
 winvm-tests:
-    if [[ "${OS:-}" == "Windows_NT" || "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]]; then printf 'Skipping Linux-only Windows VM tests.\n'; else dev/winvm/build-image.sh && dev/winvm/run.sh baseline && dev/winvm/run.sh e2e; fi
+    if [[ "${OS:-}" == "Windows_NT" || "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]]; then printf 'Skipping Linux-only Windows VM tests.\n'; else dev/winvm/build-image.sh && dev/winvm/run.sh baseline && dev/winvm/run.sh e2e && dev/winvm/run.sh flow; fi
 
 abi upstream="../win-split-tunnel":
     test -f "{{upstream}}/src/public.h"

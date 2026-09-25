@@ -5,6 +5,7 @@ root=$(cd -- "$script_dir/../.." && pwd -P)
 tmp=$(mktemp -d); trap 'find "$tmp" -depth -delete' EXIT
 "$script_dir/doctor.sh" --validate >/dev/null
 python3 -m py_compile "$script_dir/tools/qga.py"
+python3 -m py_compile "$script_dir/tools/flow-pcap.py"
 shellcheck "$script_dir"/*.sh "$script_dir/tests"/*.sh
 
 # Test commands retain JSON events while formatting their console output.
@@ -12,6 +13,26 @@ grep -Fq 'Tee-Object -FilePath' "$script_dir/test.ps1"
 grep -Fq 'Tee-Object -FilePath' "$script_dir/e2e.ps1"
 grep -Fq '        Format-GoTestOutput' "$script_dir/test.ps1"
 grep -Fq '        Format-GoTestOutput' "$script_dir/e2e.ps1"
+
+# Packet evidence accepts the selected link and stopped old-path traffic. It
+# rejects a marker that occurs on the opposite link.
+cat >"$tmp/flow-observations.jsonl" <<'EOF'
+{"token":"FLOW_TUNNEL","expectedPath":"tunnel"}
+{"token":"FLOW_UNDERLAY","expectedPath":"underlay"}
+{"token":"FLOW_STOPPED","expectedPath":"tunnel-or-none-stopped"}
+{"token":"FLOW_NONE","expectedPath":"none"}
+EOF
+printf 'FLOW_TUNNEL FLOW_STOPPED' >"$tmp/tunnel.pcap"
+printf 'FLOW_UNDERLAY' >"$tmp/underlay.pcap"
+python3 "$script_dir/tools/flow-pcap.py" --observations "$tmp/flow-observations.jsonl" \
+    --tunnel "$tmp/tunnel.pcap" --underlay "$tmp/underlay.pcap" \
+    --output "$tmp/flow-evidence.json" >/dev/null
+printf '{"token":"FLOW_TUNNEL","expectedPath":"underlay"}\n' >"$tmp/flow-invalid.jsonl"
+if python3 "$script_dir/tools/flow-pcap.py" --observations "$tmp/flow-invalid.jsonl" \
+    --tunnel "$tmp/tunnel.pcap" --underlay "$tmp/underlay.pcap" \
+    --output "$tmp/flow-invalid-evidence.json" 2>/dev/null; then
+    printf 'packet marker on the wrong link was accepted\n' >&2; exit 1
+fi
 
 # Hash checks fail closed.
 printf data >"$tmp/input"

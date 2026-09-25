@@ -3,7 +3,8 @@ param(
     [string]$SourceDir,
     [string]$ArtifactDir,
     [string]$ImageManifest = 'C:\winvm\manifest.json',
-    [string]$GoExecutable = 'go'
+    [string]$GoExecutable = 'go',
+    [switch]$Flow
 )
 $ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest
 $env:CGO_ENABLED = '0'; $env:GOTOOLCHAIN = 'local'
@@ -25,22 +26,35 @@ try {
     if ((Get-Service $service).Status -ne 'Stopped') { throw 'Driver service was not stopped at gate start' }
     Start-Service $service; $started = $true
     Set-Location $SourceDir
+    $tags = 'winintegration'
+    $timeout = '10m'
+    $runPattern = '.'
+    if ($Flow) {
+        $tags = 'winintegration,winflow'
+        $timeout = '20m'
+        $runPattern = '^TestPacketFlow'
+        $env:FLOW_ARTIFACT_DIR = $ArtifactDir
+    }
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    & $GoExecutable test -json -count=1 -tags=winintegration -p=1 -timeout 10m ./integration 2>&1 |
+    & $GoExecutable test -json -count=1 "-tags=$tags" "-run=$runPattern" -p=1 -timeout $timeout ./integration 2>&1 |
         Tee-Object -FilePath (Join-Path $ArtifactDir 'e2e-events.jsonl') |
         Format-GoTestOutput
     $testExitCode = $LASTEXITCODE
     $ErrorActionPreference = $savedPreference
     if ($testExitCode -ne 0) { throw "live-driver tests failed with exit code $testExitCode" }
     $events = @(Get-Content (Join-Path $ArtifactDir 'e2e-events.jsonl') | Where-Object { $_ -match '^\s*\{' } | ConvertFrom-Json)
-    $required = @(
-        'TestDriverLifecycle',
-        'TestEventCancellationStress',
-        'TestEventCancellationWhileControllerCloses',
-        'TestHardLinkAndAlternateLaunchPaths',
-        'TestInjectedSetupFailureRecovery'
-    )
+    if ($Flow) {
+        $required = @('TestPacketFlowCharacterization')
+    } else {
+        $required = @(
+            'TestDriverLifecycle',
+            'TestEventCancellationStress',
+            'TestEventCancellationWhileControllerCloses',
+            'TestHardLinkAndAlternateLaunchPaths',
+            'TestInjectedSetupFailureRecovery'
+        )
+    }
     foreach ($test in $required) {
         if (-not ($events | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'pass' })) { throw "$test has no pass event" }
     }

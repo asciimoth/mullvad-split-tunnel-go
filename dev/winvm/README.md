@@ -41,16 +41,19 @@ the image command creates a new key and builds a matching base image.
 just check
 just test-windows-vm
 just test-windows-e2e
+just test-windows-flow
 just test-total
 ```
 
 The baseline runs module verification, tidy, vet, tests, and build as the
 standard user. The live gate starts the verified driver, runs only the
 `windows && winintegration` package serially as `SYSTEM`, checks cleanup, and
-stops the service. `just test-total` runs the local Go and fuzz tests, then
-builds or reuses the base image and runs both VM gates. `just check` adds all
-formatting, linting, vetting, builds, and host-harness checks around
-`test-total`. Linux-only VM recipes skip on Windows.
+stops the service. The flow gate adds a second disposable endpoint guest and two
+isolated links. It validates packet markers in a capture from each link.
+`just test-total` runs the local Go and fuzz tests, then builds or reuses the
+base image and runs all three VM gates. `just check` adds all formatting,
+linting, vetting, builds, and host-harness checks around `test-total`.
+Linux-only VM recipes skip on Windows.
 
 The harness serializes VM processes on one host. Image creation has an exclusive
 content-key lock. Test runs hold a shared image lock and use a unique overlay,
@@ -90,10 +93,10 @@ script changes do not rebuild Windows. Each run records its script and source
 state through the packaged working tree and run metadata. A successful gate also
 requires retrieval of the guest artifact archive.
 
-Native arm64 execution, Secure Boot or HVCI qualification, packet-flow tests,
-and deployment install or upgrade tests are outside this QEMU appliance. The
-GitHub Actions native matrix runs the ordinary and signed-driver suites on
-Windows amd64 and arm64 hosts. On another disposable native host, use:
+Native arm64 packet-flow execution, Secure Boot or HVCI qualification, and
+deployment install or upgrade tests are outside this QEMU appliance. The GitHub
+Actions native matrix runs the ordinary and signed-driver suites on Windows
+amd64 and arm64 hosts. On another disposable native host, use:
 
 ```powershell
 ./dev/winvm/test.ps1

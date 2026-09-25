@@ -66,11 +66,18 @@ VirtIO media and the pinned signed driver 1.3.0.0:
   launch uses its separate hard-link path and needs a separate exclusion.
 - Recovery passes after setup exits at the WFP, open, initialize, register, and
   configure phases. The driver service is stopped after the gate.
+- The isolated two-guest flow gate validates 528 packet markers. It covers TCP
+  and UDP, IPv4 and IPv6, request-response and long-lived flows, all three
+  process roles, all three address profiles, active configuration and address
+  changes, and a complete reset and reinitialization cycle.
+- Link captures confirm every selected path and reject markers on the opposite
+  link. The observed change contracts are recorded in
+  [Controller Step 2 validation](docs/controller-step2-validation.md).
 
 The workflow now runs the native unit and signed-driver suites on Windows amd64
 and arm64 GitHub-hosted runners. Native arm64 execution has not run in this
-local validation session. Packet-flow tests, real VPN routing, and Secure Boot
-or HVCI qualification have not run.
+local validation session. Native arm64 packet-flow tests, real VPN routing, and
+Secure Boot or HVCI qualification have not run.
 
 On Windows amd64, `go test ./...` exercises native path resolution and process
 snapshotting without requiring the driver or elevation. Cross-compile arm64
@@ -116,11 +123,13 @@ WFP sublayers, and no competing owner. Run it alone with:
 
 ```sh
 just test-windows-e2e
+just test-windows-flow
 ```
 
-The gate exercises initialization, process registration, addresses,
+The live gate exercises initialization, process registration, addresses,
 configuration, queries, events, cancellation, reset, Unicode paths, descendants,
-and rule changes. Packet-flow and adapter-change coverage remains future work.
+and rule changes. The separate flow gate covers packet paths and controlled
+adapter-address changes.
 
 Live-driver tests remain separate from ordinary `go test ./...`. They are part
 of the explicit `test-total` gate. Neither unit tests nor the diagnostic command
