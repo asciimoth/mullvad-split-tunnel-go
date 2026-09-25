@@ -35,6 +35,43 @@
           ]
         );
 
+        windowsDriverRevision = "5b6f46cde692acb77ee74b37b9fd3f1678c45a52";
+
+        fetchWindowsDriverFile =
+          architecture: file: hash:
+          pkgs.fetchurl {
+            url = "https://raw.githubusercontent.com/mullvad/mullvadvpn-app-binaries/${windowsDriverRevision}/${architecture}-pc-windows-msvc/split-tunnel/${file}";
+            inherit hash;
+          };
+
+        windowsTestDrivers = pkgs.runCommand "mullvad-split-tunnel-driver-1.3.0.0" { } ''
+          install -Dm0444 ${
+            fetchWindowsDriverFile "x86_64" "mullvad-split-tunnel.sys"
+              "sha256-EM8lu8/lH9Zjof7IipjpuFjzpXlYm7LsSWtm5P3RsgE="
+          } $out/amd64/mullvad-split-tunnel.sys
+          install -Dm0444 ${
+            fetchWindowsDriverFile "x86_64" "mullvad-split-tunnel.inf"
+              "sha256-PdWQXl+5jWGpQqM+jJpboHw6LeHk8xnh/sPlTfZZFgg="
+          } $out/amd64/mullvad-split-tunnel.inf
+          install -Dm0444 ${
+            fetchWindowsDriverFile "x86_64" "mullvad-split-tunnel.cat"
+              "sha256-xZmSagMn164GtTT0zQOdswOS4Yl7udA+T+w2MXRKTm0="
+          } $out/amd64/mullvad-split-tunnel.cat
+
+          install -Dm0444 ${
+            fetchWindowsDriverFile "aarch64" "mullvad-split-tunnel.sys"
+              "sha256-avizv+WqCV1Sdhh1WMfH06PgwXSzRAbNbEs/jm/6ZTQ="
+          } $out/arm64/mullvad-split-tunnel.sys
+          install -Dm0444 ${
+            fetchWindowsDriverFile "aarch64" "mullvad-split-tunnel.inf"
+              "sha256-C/2wROQFNdq76zYgtlXBVjcUs6bzIx00kslyxujepvE="
+          } $out/arm64/mullvad-split-tunnel.inf
+          install -Dm0444 ${
+            fetchWindowsDriverFile "aarch64" "mullvad-split-tunnel.cat"
+              "sha256-w9J2NnOeuqfd42nREzR96D4+IXO4pRK7iGPRGxSN584="
+          } $out/arm64/mullvad-split-tunnel.cat
+        '';
+
         hasGoModule = builtins.pathExists ./go.mod;
 
         goModuleProxy =
@@ -122,8 +159,12 @@
       {
         inherit checks;
 
+        packages.windows-test-drivers = windowsTestDrivers;
+
         devShells.default = pkgs.mkShell {
           inherit (checks.pre-commit-check) shellHook;
+
+          MULLVAD_SPLIT_TUNNEL_DRIVER_DIR = windowsTestDrivers;
 
           packages = with pkgs; [
             go

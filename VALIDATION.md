@@ -90,3 +90,11 @@ and traffic for both IP families.
 Keep live-driver tests opt-in and separate from ordinary `go test ./...`.
 Neither the unit tests nor the diagnostic command installs a driver or creates a
 complete routing environment.
+
+The Nix development environment provides the pinned signed driver package for
+each supported architecture. Enter `nix develop` and copy the matching directory
+from `$MULLVAD_SPLIT_TUNNEL_DRIVER_DIR` to the dedicated Windows test VM. You
+can also build a transferable directory with `nix build .#windows-test-drivers`.
+The package contains the catalog, setup-information file, and driver binary. It
+does not provide the integration harness, WFP sublayers, TUN, routes, or DNS
+policy.

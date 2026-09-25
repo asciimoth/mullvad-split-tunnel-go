@@ -80,6 +80,30 @@ The diagnostic command opens the exclusive device and reads state. It does not
 initialize or reset policy. The `-event` option consumes one queued event; do
 not run it alongside the application that owns the driver.
 
+## Pinned Windows driver packages
+
+The Nix development environment downloads the signed 1.3.0.0 driver packages for
+amd64 and arm64 from the pinned
+[`mullvadvpn-app-binaries` commit][driver-binaries]. It verifies every file with
+a SHA-256 hash. In `nix develop`, `MULLVAD_SPLIT_TUNNEL_DRIVER_DIR` identifies a
+directory with this layout:
+
+```text
+amd64/mullvad-split-tunnel.{cat,inf,sys}
+arm64/mullvad-split-tunnel.{cat,inf,sys}
+```
+
+Build the same self-contained directory without entering the shell:
+
+```sh
+nix build .#windows-test-drivers
+```
+
+Copy the package for the target architecture to the dedicated Windows test VM.
+The package is an input for opt-in live-driver tests. It does not make ordinary
+`go test ./...` install or modify a driver. The live tests also need the WFP and
+network resources listed in [VALIDATION.md](VALIDATION.md).
+
 ## Initialize a session
 
 The caller must first create the WFP sublayers and configure the TUN and
@@ -124,9 +148,11 @@ The stock driver has a global exclusive device and fixed WFP identifiers.
 Coordinate ownership with other applications using it. A different service name
 does not create an independent driver instance.
 
-Driver binaries are not bundled. This project uses the GNU General Public
-License, version 3 or later; see
+Driver binaries are not committed to or distributed with the Go module. Nix can
+fetch the pinned test packages separately. This project uses the GNU General
+Public License, version 3 or later; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for upstream and dependency
 details.
 
+[driver-binaries]: https://github.com/mullvad/mullvadvpn-app-binaries/commit/5b6f46cde692acb77ee74b37b9fd3f1678c45a52
 [upstream]: https://github.com/mullvad/win-split-tunnel/tree/0a0eb97
