@@ -1,0 +1,57 @@
+name: Test
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - run: go mod verify
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go test -run '^$' -fuzz FuzzDriverDecoders -fuzztime 10s .
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go build ./...
+      - name: Compile ARM64
+        shell: pwsh
+        run: |
+          $env:GOARCH = 'arm64'
+          $env:CGO_ENABLED = '0'
+          go build ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o controller-arm64.test.exe .
+
+  upstream-abi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: mullvad/win-split-tunnel
+          ref: 0a0eb97f67d1dbcb3d08bda66d3b24f465d95475
+          path: upstream-driver
+      - run: g++ -std=c++17 -Wall -Wextra -Werror -I upstream-driver/src tools/abi_fixture.cpp -o abi-fixture
+      - run: ./abi-fixture > /tmp/abi.json
+      - run: cmp testdata/abi.json /tmp/abi.json

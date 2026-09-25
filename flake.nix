@@ -28,6 +28,13 @@
           inherit system;
         };
 
+        markdownFormatter = pkgs.python3.withPackages (
+          pythonPackages: with pythonPackages; [
+            mdformat
+            mdformat-gfm
+          ]
+        );
+
         hasGoModule = builtins.pathExists ./go.mod;
 
         goModuleProxy =
@@ -68,6 +75,9 @@
               commitizen.enable = true;
               deadnix.enable = true;
               gofmt.enable = true;
+              markdownlint = {
+                enable = true;
+              };
               nixfmt.enable = true;
               statix.enable = true;
               typos.enable = true;
@@ -126,6 +136,8 @@
             deadnix
             gcc
             just
+            markdownFormatter
+            markdownlint-cli
             nixfmt
             statix
             typos
