@@ -11,7 +11,6 @@ host.
 ## Repository contents
 
 - [Controller implementation plan](docs/mullvad-controller-plan.md)
-- [sysnet-windows implementation plan](docs/sysnet-windows-plan.md)
 - Controller source, diagnostic command, lifecycle example, protocol fixtures,
   tests, and CI workflow.
 
@@ -43,11 +42,24 @@ If direnv is installed, run `direnv allow` once instead. The shell installs the
 Git hooks and provides Go, gopls, golangci-lint, govulncheck, the C++ compiler,
 and the repository support tools.
 
-Use `just` to list commands. Run the complete portable check set with:
+Use `just` to list commands. Run all formatting, linting, vetting, builds,
+host-harness checks, and test suites with:
 
 ```sh
 just check
 ```
+
+Run only the test suites, including the disposable Windows baseline and the
+signed-driver gate, with:
+
+```sh
+just test-total
+```
+
+`test-total` skips its Linux-hosted VM portion on Windows. `check` includes
+`test-total`, so it also boots both disposable guests on non-Windows systems.
+See the [Windows VM guide](dev/winvm/README.md) for media setup, individual
+gates, and failure recovery.
 
 Run the Nix-managed repository checks without entering the shell with:
 

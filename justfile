@@ -3,7 +3,9 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
-check: tidy typos fmt lint vet test fuzz build build-windows
+check: tidy typos fmt lint vet build build-windows winvm-check test-total
+
+test-total: test fuzz winvm-tests
 
 tidy:
     go mod tidy
@@ -41,6 +43,33 @@ build:
 build-windows:
     GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
     GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build ./...
+
+winvm-doctor:
+    dev/winvm/doctor.sh
+
+winvm-input-hashes:
+    dev/winvm/doctor.sh --print-input-hashes
+
+winvm-image:
+    dev/winvm/build-image.sh
+
+test-windows-vm:
+    dev/winvm/run.sh baseline
+
+test-windows-e2e:
+    dev/winvm/run.sh e2e
+
+winvm-shell run:
+    dev/winvm/run.sh --shell "{{run}}"
+
+winvm-clean:
+    dev/winvm/run.sh --clean
+
+winvm-check:
+    if [[ "${OS:-}" == "Windows_NT" || "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]]; then printf 'Skipping Linux-only Windows VM host checks.\n'; else dev/winvm/tests/host-scripts.sh; fi
+
+winvm-tests:
+    if [[ "${OS:-}" == "Windows_NT" || "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]]; then printf 'Skipping Linux-only Windows VM tests.\n'; else dev/winvm/build-image.sh && dev/winvm/run.sh baseline && dev/winvm/run.sh e2e; fi
 
 abi upstream="../win-split-tunnel":
     test -f "{{upstream}}/src/public.h"

@@ -1,257 +1,306 @@
-# Plan: Mullvad Windows driver controller in Go
+# Remaining plan: Mullvad Windows driver controller in Go
 
-This plan records the design and remaining integration work for
-`mullvad-split-tunnel-go`.
+This document lists the remaining work for `mullvad-split-tunnel-go` in the
+order in which it should be done. See the [README](../README.md) for the
+implemented API and [VALIDATION.md](../VALIDATION.md) for current test evidence.
 
-## Decision and scope
+## Starting point
 
-Create a small, independent Go module that owns a handle to the Mullvad Windows
-split-tunneling driver and implements its control protocol. Keep `gonnect`, TUN
-creation, routing, DNS policy, and UI dependencies out of its core.
+The controller API, ABI codecs, overlapped I/O, cancellation, process helpers,
+and lifecycle handling are implemented. Portable tests, Windows cross-builds,
+and the disposable Windows amd64 live-driver gate pass.
 
-Target the 1.3.0.0 ABI first, on Windows amd64 and arm64. Pin a known driver
-package rather than attempting to discover compatibility by sending mutating
-IOCTLs.
+The live-driver gate covers WFP fixture creation, initialization, process
+registration, address round-trips, Unicode exclusions, descendants,
+configuration changes, events, cancellation, reset, and setup-exit recovery.
 
-The useful primitive is **exclude exact executable paths and their descendants
-from the tunnel**, with one tunnel and one underlying Internet address per
-family. The stock driver is not a general routing rule engine. Include-only
-routing, per-socket protection, user/group predicates, packet capture, DNS
-attribution, and an application-wide kill switch require separate work.
+## Fixed rules
 
-The authoritative protocol sources are `src/defs/ioctl.h`,
-`src/procmgmt/procmgmt.cpp`, and `src/firewall/firewall.cpp` in the
-[pinned upstream source][upstream].
+- Support exact executable-path exclusions and their descendants.
+- Use pinned, Mullvad-signed driver binaries. Do not build or modify the driver.
+- Support driver 1.3.0.0, pinned to upstream commit `0a0eb97`.
+- Keep driver deployment, TUN management, routing, DNS policy, and WFP resource
+  ownership outside the core package.
+- Treat the global, exclusive `\\.\MULLVADSPLITTUNNEL` device as a shared-system
+  resource. Do not stop another VPN service to claim it.
+- Accept only a verified package with the expected hash, architecture, signer,
+  version, and ABI.
 
-## Module boundary and tools
+## Step 1: Complete controller-level validation
 
-- **Native API calls**
-  - **Choice:** `golang.org/x/sys/windows`, currently pinned to v0.44.0
-  - **Ownership:** Core library
-- **Binary encoding**
-  - **Choice:** `encoding/binary` and explicit offsets
-  - **Ownership:** Core library
-- **Cancellation**
-  - **Choice:** Overlapped I/O, `CancelIoEx`, completion draining
-  - **Ownership:** Core library
-- **Process snapshot**
-  - **Choice:** Toolhelp + `QueryFullProcessImageName` + `GetProcessTimes`
-  - **Ownership:** Convenience helper
-- **Executable normalization**
-  - **Choice:** `GetFinalPathNameByHandleW` with NT volume names
-  - **Ownership:** Convenience helper
-- **Service installation**
-  - **Choice:** Service Control Manager; optional `windows/svc/mgr` package
-  - **Ownership:** Installer or later optional package
-- **Signature/version checks**
-  - **Choice:** Authenticode verification and signed package manifest
-  - **Ownership:** Deployment layer
-- **WFP objects**
-  - **Choice:** Direct WFP bindings or an audited wrapper such as `inet.af/wf`
-  - **Ownership:** Consumer, initially
-- **TUN, routes, DNS, network change monitoring**
-  - **Choice:** Wintun/IP Helper/Windows DNS APIs
-  - **Ownership:** `sysnet-windows`
+Add the remaining tests that do not require a complete VPN service.
 
-The controller uses direct Go Windows bindings; it does not require cgo or a
-Rust/C++ bridge. The C++ tool is a development fixture generator, not a runtime
-dependency.
+### Step 1 tests
 
-## Public API
+1. Repeat event cancellation while control operations run.
+1. Cover cancellation before an event read starts, while it is pending, and
+   while the controller closes.
+1. Run at least 100 read-and-cancel cycles after a warm-up period. Record the
+   process handle and goroutine counts between equal-sized batches.
+1. Repeat complete open, initialize, event-read, reset, and close cycles.
+1. Confirm that address and state queries continue while an event read blocks.
+1. Inject timeouts into each mutating operation and verify that the caller can
+   read and reconcile the resulting state.
+1. Test exclusions through hard links and alternate executable launch paths.
+   Record how the driver identifies each path.
+1. Run the native unit suite and the live-driver smoke suite on Windows arm64.
 
-- **`Open() (*Controller, error)`**
-  - **Purpose:** Open the global device without initializing or resetting it
-- **`State(ctx)`**
-  - **Purpose:** Read the native state, including unknown future values
-- **`Initialize(ctx, Sublayers)`**
-  - **Purpose:** Initialize ABI 1.3 using two existing WFP sublayer GUIDs
-- **`SnapshotProcesses()`; `RegisterProcesses(ctx, []Process)`**
-  - **Purpose:** Seed existing processes after monitoring has started
-- **`SetAddresses(ctx, Addresses)`; `Addresses(ctx)`**
-  - **Purpose:** Set/read tunnel and underlying interface addresses
-- **`ResolveDevicePath(path)`**
-  - **Purpose:** Convert an existing local executable path to a native device
-    path
-- **`SetExcludedPaths`; `SetExcludedDevicePaths`**
-  - **Purpose:** Replace the complete exclusion set
-- **`ExcludedDevicePaths`; `ClearConfiguration`**
-  - **Purpose:** Read/clear the set
-- **`QueryProcess(ctx, pid)`**
-  - **Purpose:** Read the driver's classification and parent/image metadata
-- **`ReadEvent(ctx)`**
-  - **Purpose:** Receive one classification/error event
-- **`Reset(ctx)`; `Shutdown(ctx)`; `Close()`**
-  - **Purpose:** Explicit driver teardown, combined teardown/close, local close
+### Step 1 completion gate
 
-Keep service management out of `Open`. Opening a handle is not permission to
-replace a running owner's configuration.
+- All pending I/O completes or is drained before its buffers are reused.
+- Cancellation returns the correct context error and does not block later
+  control operations.
+- Handle and goroutine counts do not show persistent growth across stress
+  batches or complete session cycles.
+- Every uncertain mutation has a tested reconciliation path.
+- Hard-link and alternate-launch behavior is documented and has regression
+  coverage.
+- The same native smoke suite passes on Windows amd64 and arm64 with the pinned
+  driver package for that architecture.
 
-Control operations serialize through one lane. Event reads use a separate lane
-so a blocked event read cannot prevent an address update or reset. Caller input
-slices must remain unchanged during a call. Filesystem path resolution and
-process enumeration are synchronous helpers; they do not promise an
-interruptible deadline.
+## Step 2: Record packet-flow behavior
 
-## Protocol requirements
+Extend the isolated live-driver harness with a controlled network topology:
 
-- **Initialize**
-  - **Pinned ABI requirement:** `0x80000004`, buffered input containing two
-    GUIDs, 32 bytes
-- **State**
-  - **Pinned ABI requirement:** Output is eight-byte `SIZE_T`, not a four-byte C
-    enum
-- **Configuration**
-  - **Pinned ABI requirement:** 16-byte header; 16-byte entries; string offsets
-    relative to the string region
-- **Processes**
-  - **Pinned ABI requirement:** 16-byte header; 32-byte entries; 64-bit
-    PID/parent fields
-- **Strings**
-  - **Pinned ABI requirement:** UTF-16LE; lengths in bytes; no implicit NUL
-    terminator
-- **Addresses**
-  - **Pinned ABI requirement:** 40 bytes: tunnel IPv4, Internet IPv4, tunnel
-    IPv6, Internet IPv6
-- **Configuration read**
-  - **Pinned ABI requirement:** Eight-byte size probe succeeds, then fetch the
-    reported buffer size
-- **Process query**
-  - **Pinned ABI requirement:** Image begins at byte 20; returned size includes
-    the upstream structure's trailing padding
-- **Events**
-  - **Pinned ABI requirement:** 16-byte header, then ID-dependent payload
-- **State 5**
-  - **Pinned ABI requirement:** `Zombie` in the pinned driver header
+### Step 2 tests
 
-These details come from `src/defs` and `src/ioctl.cpp` in the
-[pinned upstream source][upstream]. Avoid copying an older userspace structure
-without checking both.
+1. Create isolated tunnel and underlay endpoints with distinct observable
+   routes. Do not use the developer's active network as a test target.
+1. Run TCP connect, TCP long-lived stream, UDP request-response, and long-lived
+   UDP tests over IPv4 and IPv6.
+1. Run each case for an excluded executable, its descendant, and a non-excluded
+   executable.
+1. Repeat the matrix with dual-stack, IPv4-only, and IPv6-only addresses.
+1. Add, replace, and clear exclusions while flows are active.
+1. Replace tunnel and underlay addresses while flows are active.
+1. Record whether each existing flow moves, stops, or keeps its previous policy.
+   Then test the policy of a new flow from the same process.
+1. Confirm that traffic does not use an unintended path during each change.
+1. Repeat the matrix after driver reset and reinitialization.
 
-Use explicit offsets instead of serializing Go structs or assuming
-`binary.Write` inserts C padding. Bound lengths and record counts before
-allocation. Reject malformed UTF-16 and offsets. Preserve unknown event payloads
-for diagnostics. Use the clear IOCTL for an empty exclusion set.
+Do not infer packet behavior from a successful IOCTL. Characterize behavior
+first, review the result, and then convert it into regression assertions.
 
-Keep both IO buffers and `OVERLAPPED` alive until actual completion.
-Cancellation requests alone do not make them reusable. This is implemented in
-the controller, but still needs native stress testing. See the
-[Microsoft I/O cancellation documentation][ioapiset].
+### Step 2 completion gate
 
-## WFP and resource ownership
+- The matrix covers TCP and UDP, IPv4 and IPv6, new and existing flows, and
+  excluded, descendant, and non-excluded processes.
+- Packet observations prove the selected path; API return values alone are not
+  accepted as evidence.
+- Address and exclusion changes have documented, repeatable behavior.
+- No test leaks traffic to the unintended tunnel or underlay path.
+- Reset and reinitialization restore the initial behavior without a guest
+  rebuild.
 
-Create the baseline and DNS sublayers through a **non-dynamic WFP session**,
-commit them, then pass their GUIDs to the driver. The driver creates its own
-dynamic session; WFP forbids references to dynamic objects belonging to another
-session. Reset the driver before deleting referenced sublayers. See
-`src/firewall/firewall.cpp` in the [upstream source][upstream] and the
-[Microsoft WFP documentation][wfp].
+## Step 3: Build the deployment component
 
-Do not hold a caller WFP transaction across an IOCTL that modifies WFP: the
-driver's separate transaction can contend with it.
+Build this component outside the core package:
 
-Use application-owned provider/sublayer identifiers, suitable ACLs, and a
-cleanup ledger. The sublayer weight policy belongs to the consumer and must be
-tested together with the driver's filters. Unreferenced sublayers are safe to
-remove only after ownership has been established.
+### Step 3 implementation and tests
 
-The stock device name is `\\.\MULLVADSPLITTUNNEL` and is opened exclusively. The
-driver also has fixed internal provider/callout/filter identifiers. Renaming its
-SCM service does not provide coexistence with another copy. Treat
-sharing/access-denied failures as ownership conflicts; never automatically stop
-another VPN service. See `src/driverentry.cpp` and `src/firewall/identifiers.h`
-in the [upstream source][upstream].
+1. Define a package manifest for each supported architecture.
+1. Record the driver version, source commit, package hashes, signer, controller
+   version, and minimum Windows build.
+1. Verify the package hash, Authenticode signature, signer, version, and
+   architecture before installation.
+1. Add SCM install, start, stop, upgrade, and uninstall operations.
+1. Add an ownership lock and a recoverable cleanup ledger.
+1. Reject unexpected driver state or a device owned by another application.
+1. Unit-test manifest parsing, architecture selection, and version comparison.
+1. Verify rejection of a changed file, an unsigned file, a wrong signer, a wrong
+   architecture, a wrong version, and an incomplete package.
+1. Test fresh installation and the already-installed expected package.
+1. Test restart, same-version repair, supported upgrade, rollback after a failed
+   upgrade, and uninstall.
+1. Inject failure after every state-changing operation. Restart the deployment
+   process and recover from the cleanup ledger.
+1. Test concurrent deployment attempts and an active device owner.
+1. Confirm that uninstall removes only resources recorded as owned.
 
-## Initialization, updates, and teardown
+The existing VM harness verifies its pinned test package, but it is not the
+production deployment component.
 
-1. Deployment verifies and starts the supported signed package. The consumer
-   prepares its WFP resources and adapter configuration.
-1. Open the driver and inspect state. A fresh session should be `Started`.
-   Unexpected state enters an explicit recovery path after ownership checks.
-1. Initialize. Only then take the initial process snapshot, because
-   initialization starts the process watcher and buffers subsequent changes.
-1. Register the snapshot. Keep unknown-image entries and expose warnings. Clear
-   unverifiable/recycled parent links instead of attributing a process to an
-   unrelated parent.
-1. Register actual TUN and underlying interface addresses, then replace the
-   exclusions.
-1. Run an event reader and a consumer-owned adapter monitor. Serialize
-   address/configuration replacements. Re-read state after a timeout or other
-   uncertain mutation.
-1. On shutdown, cancel and join workers, reset with a fresh cleanup context,
-   close the device, then release consumer resources. A failed reset must be
-   surfaced to recovery.
+### Step 3 completion gate
 
-The upstream production controller provides a useful comparison for snapshot
-ordering and parent creation-time handling:
+- No package reaches SCM before all identity checks pass.
+- Architecture selection works on native amd64 and arm64 systems.
+- Install, repair, restart, upgrade, rollback, and uninstall pass on fresh
+  disposable machines.
+- Recovery succeeds after interruption at every recorded mutation point.
+- Concurrent or foreign ownership produces a clear error and does not change the
+  other owner's service, device, or WFP state.
+- A successful uninstall leaves no owned service, package, lock, or ledger
+  entry. Failed cleanup leaves enough ledger data for the next recovery run.
+
+## Step 4: Integrate the controller into the service host
+
+Implement one service-owned session in this order:
+
+1. Verify and start the pinned signed package.
+1. Create application-owned baseline and DNS sublayers in a non-dynamic WFP
+   session. Commit them before driver initialization.
+1. Create the TUN and configure caller-owned network resources.
+1. Open the driver and require the expected fresh state. Use an explicit
+   recovery path for any other state.
+1. Initialize the driver.
+1. Take and register the process snapshot. Initialization must come first
+   because it starts the process watcher.
+1. Set the TUN and underlying interface addresses.
+1. Set the executable exclusions.
+1. Start event reading and network-change monitoring.
+1. Refresh addresses and exclusions when external state changes. Reconcile state
+   after a timed-out or otherwise uncertain mutation.
+1. On shutdown, stop workers, reset with a fresh cleanup context, and close the
+   device.
+1. Delete referenced WFP objects and other caller-owned resources only after a
+   successful reset. Send reset failures to recovery logic.
+
+Do not use dynamic caller WFP sublayers. Do not hold a caller WFP transaction
+across a driver IOCTL that changes WFP state.
+
+Keep original DOS executable paths in addition to resolved NT paths. Refresh
+them after drive remounts or executable changes. Network executable paths and
+glob rules remain unsupported.
+
+### Step 4 tests
+
+1. Unit-test the service state machine with failures before and after every
+   setup and teardown operation.
+1. Run the complete lifecycle in the disposable live-driver VM.
+1. Exit the service after WFP creation, TUN creation, open, initialize, process
+   registration, address configuration, and exclusion configuration. Restart it
+   and verify recovery.
+1. Test an empty and a partial process snapshot. Preserve warnings without
+   assigning a recycled parent PID to the wrong process.
+1. Start processes before the snapshot, during registration, and after
+   configuration. Verify that none are lost from classification.
+1. Block an event read while addresses and exclusions change.
+1. Test a second service instance and an existing foreign driver owner.
+1. Force reset failure. Confirm that referenced WFP objects remain and the
+   ledger retains enough information for recovery.
+1. Remount a drive or replace an executable and verify path refresh from the
+   stored DOS path.
+1. Stop the service during active events and control operations.
+
+### Step 4 completion gate
+
+- The state-machine tests cover every transition and cleanup edge.
+- The live session reaches ready state and shuts down cleanly from every
+  completed startup phase.
+- Successful shutdown leaves no controller handle, worker, referenced WFP
+  object, TUN, route, or DNS setting owned by the session.
+- Failed reset preserves referenced resources and produces an actionable
+  recovery record.
+- Process startup races do not leave an unclassified process.
+- A second or foreign owner is not reset, stopped, or reconfigured.
+- Path refresh updates exclusions without losing the user's original path.
+
+## Step 5: Add operational recovery
+
+Add diagnostics, bounded retries, and explicit recovery. Test each condition:
+
+### Step 5 tests
+
+1. Sleep and resume.
+1. Base Filtering Engine restart.
+1. Service or user-process crash.
+1. Driver failure.
+1. Adapter and default-route changes.
+1. Repeated service start and stop.
+1. Loss and restoration of IPv4, IPv6, and dual-stack connectivity.
+1. Drive remount and executable replacement while an exclusion is active.
+1. Corrupt or incomplete cleanup ledger data.
+1. Retry exhaustion and service restart after exhaustion.
+
+For every case, record detection time, retry count, recovery time, final driver
+state, final network state, and retained owned resources. Run repeated
+start-and-stop and suspend-and-resume loops to expose cumulative leaks.
+
+### Step 5 completion gate
+
+- Each fault either restores the documented ready state within a configured
+  bound or enters one stable failure state with an actionable diagnostic.
+- Retries are bounded and do not form a busy loop.
+- Recovery does not delete or reconfigure resources owned by another
+  application.
+- A service restart can continue recovery from every retained ledger state.
+- Event readers, controller handles, WFP objects, adapters, routes, and DNS
+  settings do not show cumulative growth across repeated loops.
+- Network changes result in the expected address and path refresh.
+
+## Step 6: Qualify supported Windows configurations
+
+Run the deployment, lifecycle, traffic, and recovery suites on each supported
+architecture and Windows version. Include systems with Secure Boot and Memory
+Integrity enabled.
+
+### Step 6 tests
+
+1. Define the proposed support matrix before qualification starts.
+1. Start each matrix entry from a clean Windows installation.
+1. Record the OS build, architecture, firmware mode, Secure Boot state, Memory
+   Integrity state, driver package identity, and controller revision.
+1. Run deployment, service lifecycle, packet-flow, fault-recovery, restart, and
+   uninstall tests on each entry.
+1. Reboot after installation and during retained recovery state.
+1. Run an extended session with repeated configuration changes and event
+   cancellation.
+1. Save logs, package verification results, test results, and final cleanup
+   checks as qualification evidence.
+
+### Step 6 completion gate
+
+- Every advertised matrix entry has a successful native run with the exact
+  pinned Mullvad-signed package.
+- Secure Boot and Memory Integrity are measured as enabled for entries that
+  claim them; configuration intent is not sufficient evidence.
+- Each entry passes install through uninstall, including traffic and recovery
+  tests.
+- Reboot and extended-session tests do not produce persistent leaks or stale
+  policy.
+- Failed matrix entries are fixed and rerun, or removed from the support matrix.
+  Cross-build results alone do not qualify a platform.
+
+## Step 7: Prepare the first public release
+
+### Step 7 tests
+
+1. Define the stable API and support matrix.
+1. Build a clean consumer program from the published module interface and run
+   its basic lifecycle on a qualified system.
+1. Run all portable, fuzz, cross-build, native, live-driver, traffic,
+   deployment, and recovery gates from the release revision.
+1. Run vulnerability, license, module-integrity, formatting, lint, and vet
+   checks.
+1. Complete notices, API documentation, lifecycle examples, and recovery
+   instructions.
+1. Build release artifacts from a clean checkout. Record their hashes and verify
+   them on a second clean machine.
+1. Check that documentation does not advertise untested capabilities or
+   platforms.
+1. Confirm that the release uses only the approved pinned Mullvad-signed driver
+   packages.
+
+### Step 7 completion gate
+
+- All required gates pass from the exact release revision.
+- The clean consumer test passes without repository-local paths or uncommitted
+  files.
+- Release artifacts are reproducible through the documented build process and
+  match their published hashes.
+- Notices cover the module and dependencies, and the documentation records the
+  external driver package provenance.
+- The support matrix links to the qualification evidence from Step 6.
+- Known limitations and recovery actions are documented.
+- No release documentation claims untested driver behavior or a platform without
+  native evidence.
+
+## Protocol references
+
+Protocol authority remains `src/defs/ioctl.h`, `src/procmgmt/procmgmt.cpp`, and
+`src/firewall/firewall.cpp` in the [pinned upstream source][upstream]. The
+upstream production controller is also useful for lifecycle comparisons:
 [Mullvad Windows controller][mullvad-app].
 
-Path normalization is snapshot-based. Preserve the user's original DOS path
-separately from its resolved NT path so a consumer can refresh exclusions after
-drive remounts or executable changes. Hard links and alternate launch paths need
-explicit tests. The controller rejects network executable paths and glob rules.
-
-## Milestones and acceptance gates
-
-- **C0: ABI baseline**
-  - **Deliverables:** Current codecs, constants, golden fixtures, API
-  - **Completion gate:** Native-header fixture generator reproduces committed
-    fixtures; Go golden tests pass
-- **C1: Native runtime**
-  - **Deliverables:** Current overlapped transport and lifecycle
-  - **Completion gate:** Native amd64 tests pass; ARM64 compile and native smoke
-    tests pass; no handle leak after repeated event cancellation
-- **C2: Controlled driver session**
-  - **Deliverables:** Small privileged integration harness creates/deletes test
-    WFP objects and uses this API
-  - **Completion gate:** Initialize/register/configure/query/reset succeeds on
-    the pinned driver; failure at every step leaves recoverable owned state
-- **C3: Deployment**
-  - **Deliverables:** Package manifest, architecture selection,
-    signature/hash/version checks, SCM management, ownership lock
-  - **Completion gate:** Fresh install/start/stop/upgrade/uninstall tested with
-    Secure Boot and Memory Integrity enabled on supported systems
-- **C4: Operational resilience**
-  - **Deliverables:** Service-host integration, diagnostics, explicit recovery,
-    bounded retry, refreshed paths
-  - **Completion gate:** Sleep/resume, BFE restart, user process crash, driver
-    failure, network switch, and repeated start/stop tested
-- **C5: First public release**
-  - **Deliverables:** Stable API, CI, support matrix, notices, release artifacts
-  - **Completion gate:** All applicable gates above pass; no unsupported
-    capability is advertised
-
-**Current delivery:** C0/C1 code, unit and fuzz tests, a diagnostic command, and
-a session example. Portable tests and Windows cross-builds pass. Native Windows
-tests, the native-driver harness, driver installation, signature verification,
-WFP creation, and crash recovery remain to implement.
-
-C2 is the first integration task to do next. It should test normal and
-IPv4-only/IPv6-only address combinations, exact paths with non-ASCII characters,
-already-running and newly spawned descendants, removal of exclusions, and
-long-lived TCP/UDP flows. Record what happens to existing flows when a rule
-changes; do not infer instantaneous migration from a successful IOCTL.
-
-## Version and distribution policy
-
-Maintain a compatibility table containing driver version, source commit, package
-hash, architecture, signer, controller version, and minimum supported Windows
-build. Obtain a known signed package through your own deployment flow; do not
-assume every binary shipped by another VPN is interchangeable.
-
-Amnezia's pinned recipe illustrates the mismatch risk: it references 1.2.5.0,
-whose initialization differs from 1.3. Supporting it later should use an
-explicit ABI adapter selected from verified package metadata.
-[Amnezia recipe][amnezia].
-
-If you need independent device/provider names or new semantics, that becomes a
-driver fork and signed-driver distribution project. The Go controller alone
-cannot provide it. Consult `LICENSE-MPL.txt` and `LICENSE-GPL.md` in the
-[upstream source][upstream], plus Microsoft's
-[driver installation documentation][driver-install], when defining distribution.
-
-[amnezia]: https://github.com/amnezia-vpn/amnezia-client/tree/327e598
-[driver-install]: https://learn.microsoft.com/windows-hardware/drivers/install/
-[ioapiset]: https://learn.microsoft.com/windows/win32/api/ioapiset/
 [mullvad-app]: https://github.com/mullvad/mullvadvpn-app/tree/643a4cd
 [upstream]: https://github.com/mullvad/win-split-tunnel/tree/0a0eb97
-[wfp]: https://learn.microsoft.com/windows/win32/fwp/

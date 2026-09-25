@@ -15,12 +15,24 @@ The following checks pass in the pinned Nix development environment:
 - Windows amd64 and arm64 test-binary compilation.
 - `govulncheck`, with no known vulnerabilities reported.
 - Nix, GitHub Actions, spelling, and repository configuration checks.
+- Host-only VM harness tests for locks, packaging, overlays, QGA/QMP, bounded
+  output, timeouts, and cleanup.
 
-Run the same portable check set with:
+Run every quality check and test gate with:
 
 ```sh
 just check
 ```
+
+Run only the test suites, including both disposable Windows VM runs on Linux,
+with:
+
+```sh
+just test-total
+```
+
+`just check` includes `test-total`. The standalone `test-total` recipe does not
+run formatting, linting, vetting, or build-only checks.
 
 The protocol tests compare Go encoders and decoders with independent C++
 fixtures. They exercise malformed data and controller cancellation and lifecycle
@@ -30,14 +42,26 @@ The committed ABI fixture was generated from the pinned upstream headers and
 passed its original C++ layout assertions. This validation session did not
 regenerate it because the upstream checkout was not available.
 
-## Checks that require Windows
+## Verified in the Windows VM
 
-The following checks have not run in this environment:
+The amd64 Windows Server 2022 VM gates pass with the locked installation and
+VirtIO media and the pinned signed driver 1.3.0.0:
 
-- Native Windows path resolution and process snapshot tests.
-- Native arm64 execution.
-- Live signed-driver initialization, routing, events, and cancellation.
-- Handle-leak and recovery tests against the kernel driver.
+- Native path resolution and process snapshot tests run as the standard `winvm`
+  account.
+- The dirty working tree passes module verification, tidiness, vet, tests, and
+  build in the guest.
+- The live gate verifies the staged and installed driver hashes, version,
+  service configuration, and Authenticode signer before service start.
+- Two complete controller lifecycles pass as `SYSTEM`, including WFP fixture
+  creation, initialization, process registration, IPv4 and IPv6 address
+  round-trips, Unicode exclusions, descendant state, configuration changes,
+  events, cancellation, and reset.
+- Recovery passes after setup exits at the WFP, open, initialize, register, and
+  configure phases. The driver service is stopped after the gate.
+
+Native Windows arm64 execution, packet-flow tests, real VPN routing, and Secure
+Boot or HVCI qualification have not run.
 
 On Windows amd64, `go test ./...` exercises native path resolution and process
 snapshotting without requiring the driver or elevation. Cross-compile arm64
@@ -75,21 +99,23 @@ cmp testdata/abi.json abi-generated.json
 The fixture verifies structure sizes and offsets and emits reference buffers. It
 is not a Windows WDK build or evidence that kernel behavior works.
 
-## Required native-driver gate
+## Native-driver gate
 
-Implement the privileged integration harness described by controller-plan
-milestone C2. Use a dedicated Windows test VM with the compatible driver,
-application-owned WFP sublayers, a working TUN, and no competing owner.
+The privileged integration harness implements controller-plan milestone C2 in a
+dedicated disposable VM. It uses the compatible driver, test-owned persistent
+WFP sublayers, and no competing owner. Run it alone with:
 
-Exercise initialization, process registration, addresses, configuration,
-queries, events, and reset. Reject occupied or unexpected state. Stress event
-cancellation while control IOCTLs run. Verify that repeated shutdown does not
-leak handles. Test Unicode paths, descendants, rule changes, adapter changes,
-and traffic for both IP families.
+```sh
+just test-windows-e2e
+```
 
-Keep live-driver tests opt-in and separate from ordinary `go test ./...`.
-Neither the unit tests nor the diagnostic command installs a driver or creates a
-complete routing environment.
+The gate exercises initialization, process registration, addresses,
+configuration, queries, events, cancellation, reset, Unicode paths, descendants,
+and rule changes. Packet-flow and adapter-change coverage remains future work.
+
+Live-driver tests remain separate from ordinary `go test ./...`. They are part
+of the explicit `test-total` gate. Neither unit tests nor the diagnostic command
+installs a driver or creates a complete routing environment.
 
 The Nix development environment provides the pinned signed driver package for
 each supported architecture. Enter `nix develop` and copy the matching directory

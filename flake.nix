@@ -154,6 +154,30 @@
               };
             };
           };
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          winvm-host =
+            pkgs.runCommand "winvm-host-check"
+              {
+                nativeBuildInputs = with pkgs; [
+                  coreutils
+                  git
+                  jq
+                  openssh
+                  python3
+                  qemu-utils
+                  shellcheck
+                  util-linux
+                ];
+              }
+              ''
+                cp -R ${./.} source
+                chmod -R u+w source
+                cd source
+                patchShebangs dev/winvm
+                dev/winvm/tests/host-scripts.sh
+                touch $out
+              '';
         };
       in
       {
@@ -165,24 +189,40 @@
           inherit (checks.pre-commit-check) shellHook;
 
           MULLVAD_SPLIT_TUNNEL_DRIVER_DIR = windowsTestDrivers;
+          WINVM_OVMF_CODE = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.OVMF.fd}/FV/OVMF_CODE.fd";
+          WINVM_OVMF_VARS = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.OVMF.fd}/FV/OVMF_VARS.fd";
 
-          packages = with pkgs; [
-            go
-            golangci-lint
-            gopls
-            govulncheck
+          packages =
+            with pkgs;
+            [
+              go
+              golangci-lint
+              gopls
+              govulncheck
 
-            actionlint
-            commitizen
-            deadnix
-            gcc
-            just
-            markdownFormatter
-            markdownlint-cli
-            nixfmt
-            statix
-            typos
-          ];
+              actionlint
+              commitizen
+              deadnix
+              gcc
+              just
+              markdownFormatter
+              markdownlint-cli
+              nixfmt
+              statix
+              typos
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              curl
+              jq
+              openssh
+              OVMF
+              python3
+              qemu
+              shellcheck
+              shfmt
+              util-linux
+              xorriso
+            ];
         };
       }
     );

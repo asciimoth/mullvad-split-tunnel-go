@@ -38,3 +38,9 @@ go.work.sum
 /.pre-commit-config.yaml
 /.direnv/
 /local/
+/dev/winvm/env
+/.artifacts/winvm/
+/dev/winvm/*.qcow2
+/dev/winvm/*.iso
+/dev/winvm/*.sock
+/dev/winvm/tools/__pycache__/
