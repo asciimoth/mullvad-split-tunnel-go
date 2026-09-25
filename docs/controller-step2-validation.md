@@ -27,17 +27,46 @@ The gate runs TCP request-response, long-lived TCP, UDP request-response, and
 long-lived UDP flows over IPv4 and IPv6. Each case runs from an excluded
 executable, its inherited descendant, and a non-excluded executable.
 
-The observed new-flow policy is:
+The observed new-flow policy covers all nine address modes from the pinned
+driver documentation:
 
-| Configured addresses | Excluded and descendant IPv4 | Excluded and descendant IPv6 | Non-excluded |
-| -------------------- | ---------------------------- | ---------------------------- | ------------ |
-| Dual stack           | Underlay                     | Underlay                     | Tunnel       |
-| IPv4 only            | Underlay                     | Tunnel                       | Tunnel       |
-| IPv6 only            | Tunnel                       | Underlay                     | Tunnel       |
+| Mode | Available addresses                     | Excluded IPv4                | Excluded IPv6                |
+| ---- | --------------------------------------- | ---------------------------- | ---------------------------- |
+| 1    | Internet and tunnel IPv4/IPv6           | Underlay                     | Underlay                     |
+| 2    | Internet and tunnel IPv4                | Underlay                     | Tunnel                       |
+| 3    | Internet and tunnel IPv4; Internet IPv6 | Underlay                     | Tunnel, explicitly permitted |
+| 4    | Internet and tunnel IPv4; tunnel IPv6   | Underlay                     | Blocked                      |
+| 5    | Internet and tunnel IPv6                | Tunnel                       | Underlay                     |
+| 6    | Internet IPv4; Internet and tunnel IPv6 | Tunnel, explicitly permitted | Underlay                     |
+| 7    | Tunnel IPv4; Internet and tunnel IPv6   | Blocked                      | Underlay                     |
+| 8    | Tunnel IPv4; Internet IPv6              | Blocked                      | Tunnel, explicitly permitted |
+| 9    | Internet IPv4; tunnel IPv6              | Tunnel, explicitly permitted | Blocked                      |
 
-An excluded family uses the underlay only when the driver has both the tunnel
-and Internet address for that family. If the pair is incomplete, the new flow
-keeps the normal tunnel policy.
+Descendants have the same result as excluded executables. Non-excluded
+executables use the tunnel in every mode. An excluded family uses the underlay
+only when the driver has both addresses for that family. A tunnel-only family
+fails closed. An Internet-only family has no redirect rule, so it keeps the
+normal route, but the driver explicitly permits it through caller firewall
+policy.
+
+## WFP interactions
+
+The gate adds lower-priority block filters at the IPv4 and IPv6 outbound ALE
+authorization layers. It tests these filters first in the caller-owned baseline
+sublayer on port 47823 and then in the caller-owned DNS sublayer on port 53. It
+repeats both restrictive-filter matrices in all nine address modes. The port 53
+endpoint carries the test echo payload; the test qualifies WFP sublayer
+arbitration, not Windows DNS resolver behavior.
+
+For TCP and UDP over IPv4 and IPv6, an installed driver permit overrides the
+restrictive filter for the excluded executable and its descendant. A complete
+address pair uses the underlay, while an Internet-only family keeps the normal
+tunnel route in this topology. A tunnel-only family remains blocked. A family
+with neither address is also blocked because the driver does not add a permit
+for it. The same filters block every non-excluded flow. Capture markers prove
+each permitted path and prove that blocked flows use neither link. This
+qualifies both the permit behavior and the restrictive caller policy, including
+the port-53 permit filters in the DNS sublayer.
 
 ## Active-flow changes
 
@@ -56,9 +85,10 @@ reports an error. No marker was observed on the opposite path. The regression
 gate permits an old-path retransmission during teardown, but rejects all
 opposite-path traffic.
 
-Reset and reinitialization repeat the complete matrix and all active-change
-cases without rebuilding either guest. The recorded run on 25 September 2026
-validated 528 markers across the two cycles.
+Reset and reinitialization repeat the complete matrix, WFP interaction tests,
+and all active-change cases without rebuilding either guest. The recorded run on
+25 September 2026 validated 1,472 observations: 736 before reset and 736 after
+reinitialization. All observations had the expected path.
 
 ## Safety boundary
 

@@ -16,7 +16,7 @@ The following checks pass in the pinned Nix development environment:
 - `govulncheck`, with no known vulnerabilities reported.
 - Nix, GitHub Actions, spelling, and repository configuration checks.
 - Host-only VM harness tests for locks, packaging, overlays, QGA/QMP, bounded
-  output, timeouts, and cleanup.
+  output, timeouts, cleanup, and packet-evidence acceptance and rejection.
 
 Run every quality check and test gate with:
 
@@ -66,10 +66,11 @@ VirtIO media and the pinned signed driver 1.3.0.0:
   launch uses its separate hard-link path and needs a separate exclusion.
 - Recovery passes after setup exits at the WFP, open, initialize, register, and
   configure phases. The driver service is stopped after the gate.
-- The isolated two-guest flow gate validates 528 packet markers. It covers TCP
-  and UDP, IPv4 and IPv6, request-response and long-lived flows, all three
-  process roles, all three address profiles, active configuration and address
-  changes, and a complete reset and reinitialization cycle.
+- The isolated two-guest flow gate validates 1,472 packet observations. It
+  covers TCP and UDP, IPv4 and IPv6, request-response and long-lived flows, all
+  three process roles, all nine driver address modes, restrictive filters in the
+  baseline and DNS sublayers, active configuration and address changes, and a
+  complete reset and reinitialization cycle.
 - Link captures confirm every selected path and reject markers on the opposite
   link. The observed change contracts are recorded in
   [Controller Step 2 validation](docs/controller-step2-validation.md).

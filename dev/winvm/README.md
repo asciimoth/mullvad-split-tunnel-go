@@ -49,11 +49,12 @@ The baseline runs module verification, tidy, vet, tests, and build as the
 standard user. The live gate starts the verified driver, runs only the
 `windows && winintegration` package serially as `SYSTEM`, checks cleanup, and
 stops the service. The flow gate adds a second disposable endpoint guest and two
-isolated links. It validates packet markers in a capture from each link.
-`just test-total` runs the local Go and fuzz tests, then builds or reuses the
-base image and runs all three VM gates. `just check` adds all formatting,
-linting, vetting, builds, and host-harness checks around `test-total`.
-Linux-only VM recipes skip on Windows.
+isolated links. It validates packet markers in a capture from each link. The
+matrix covers all nine driver address modes and restrictive filters in the
+caller-owned baseline and DNS sublayers. `just test-total` runs the local Go and
+fuzz tests, then builds or reuses the base image and runs all three VM gates.
+`just check` adds all formatting, linting, vetting, builds, and host-harness
+checks around `test-total`. Linux-only VM recipes skip on Windows.
 
 The harness serializes VM processes on one host. Image creation has an exclusive
 content-key lock. Test runs hold a shared image lock and use a unique overlay,

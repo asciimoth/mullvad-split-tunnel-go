@@ -15,6 +15,7 @@ const (
 	defaultIPv4 = "203.0.113.1"
 	defaultIPv6 = "2001:db8:ffff::1"
 	defaultPort = 47823
+	dnsPort     = 53
 )
 
 func main() {
@@ -26,6 +27,8 @@ func main() {
 	addresses := []string{
 		net.JoinHostPort(*ipv4, fmt.Sprint(*port)),
 		net.JoinHostPort(*ipv6, fmt.Sprint(*port)),
+		net.JoinHostPort(*ipv4, fmt.Sprint(dnsPort)),
+		net.JoinHostPort(*ipv6, fmt.Sprint(dnsPort)),
 	}
 	serveErrors := make(chan error, len(addresses)*2)
 	for _, address := range addresses {
@@ -37,7 +40,7 @@ func main() {
 			serveErrors <- serveUDP(address)
 		}()
 	}
-	fmt.Fprintf(os.Stderr, "flowecho listening on %s and %s\n", addresses[0], addresses[1])
+	fmt.Fprintf(os.Stderr, "flowecho listening on %v\n", addresses)
 	if err := <-serveErrors; err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

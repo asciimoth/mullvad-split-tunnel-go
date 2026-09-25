@@ -26,6 +26,8 @@ import (
 const (
 	flowServiceIPv4 = "203.0.113.1:47823"
 	flowServiceIPv6 = "[2001:db8:ffff::1]:47823"
+	flowDNSIPv4     = "203.0.113.1:53"
+	flowDNSIPv6     = "[2001:db8:ffff::1]:53"
 )
 
 type flowRequest struct {
@@ -305,17 +307,102 @@ func flowHost(address string) string {
 	return host
 }
 
-func expectedFlowPath(profile, role, network string) string {
+type addressMode struct {
+	name        string
+	addresses   splittunnel.Addresses
+	ipv4Path    string
+	ipv6Path    string
+	wfpIPv4Path string
+	wfpIPv6Path string
+}
+
+func addr(value string) netip.Addr {
+	return netip.MustParseAddr(value)
+}
+
+func addressModes(suffix string) []addressMode {
+	t4 := addr("198.18.0." + suffix)
+	i4 := addr("198.18.1." + suffix)
+	t6 := addr("fd00:18:0::" + suffix)
+	i6 := addr("fd00:18:1::" + suffix)
+	return []addressMode{
+		{name: "mode-1-dual-stack", addresses: splittunnel.Addresses{TunnelIPv4: t4, InternetIPv4: i4, TunnelIPv6: t6, InternetIPv6: i6}, ipv4Path: "underlay", ipv6Path: "underlay", wfpIPv4Path: "underlay", wfpIPv6Path: "underlay"},
+		{name: "mode-2-ipv4-only", addresses: splittunnel.Addresses{TunnelIPv4: t4, InternetIPv4: i4}, ipv4Path: "underlay", ipv6Path: "tunnel", wfpIPv4Path: "underlay", wfpIPv6Path: "none"},
+		{name: "mode-3-ipv4-internet-ipv6", addresses: splittunnel.Addresses{TunnelIPv4: t4, InternetIPv4: i4, InternetIPv6: i6}, ipv4Path: "underlay", ipv6Path: "tunnel", wfpIPv4Path: "underlay", wfpIPv6Path: "tunnel"},
+		{name: "mode-4-ipv4-tunnel-ipv6", addresses: splittunnel.Addresses{TunnelIPv4: t4, InternetIPv4: i4, TunnelIPv6: t6}, ipv4Path: "underlay", ipv6Path: "none", wfpIPv4Path: "underlay", wfpIPv6Path: "none"},
+		{name: "mode-5-ipv6-only", addresses: splittunnel.Addresses{TunnelIPv6: t6, InternetIPv6: i6}, ipv4Path: "tunnel", ipv6Path: "underlay", wfpIPv4Path: "none", wfpIPv6Path: "underlay"},
+		{name: "mode-6-internet-ipv4-ipv6", addresses: splittunnel.Addresses{InternetIPv4: i4, TunnelIPv6: t6, InternetIPv6: i6}, ipv4Path: "tunnel", ipv6Path: "underlay", wfpIPv4Path: "tunnel", wfpIPv6Path: "underlay"},
+		{name: "mode-7-tunnel-ipv4-ipv6", addresses: splittunnel.Addresses{TunnelIPv4: t4, TunnelIPv6: t6, InternetIPv6: i6}, ipv4Path: "none", ipv6Path: "underlay", wfpIPv4Path: "none", wfpIPv6Path: "underlay"},
+		{name: "mode-8-tunnel-ipv4-internet-ipv6", addresses: splittunnel.Addresses{TunnelIPv4: t4, InternetIPv6: i6}, ipv4Path: "none", ipv6Path: "tunnel", wfpIPv4Path: "none", wfpIPv6Path: "tunnel"},
+		{name: "mode-9-internet-ipv4-tunnel-ipv6", addresses: splittunnel.Addresses{InternetIPv4: i4, TunnelIPv6: t6}, ipv4Path: "tunnel", ipv6Path: "none", wfpIPv4Path: "tunnel", wfpIPv6Path: "none"},
+	}
+}
+
+func TestPacketFlowPolicyTable(t *testing.T) {
+	want := []struct {
+		name         string
+		availability string
+		paths        [4]string
+	}{
+		{name: "mode-1-dual-stack", availability: "1111", paths: [4]string{"underlay", "underlay", "underlay", "underlay"}},
+		{name: "mode-2-ipv4-only", availability: "1100", paths: [4]string{"underlay", "tunnel", "underlay", "none"}},
+		{name: "mode-3-ipv4-internet-ipv6", availability: "1110", paths: [4]string{"underlay", "tunnel", "underlay", "tunnel"}},
+		{name: "mode-4-ipv4-tunnel-ipv6", availability: "1101", paths: [4]string{"underlay", "none", "underlay", "none"}},
+		{name: "mode-5-ipv6-only", availability: "0011", paths: [4]string{"tunnel", "underlay", "none", "underlay"}},
+		{name: "mode-6-internet-ipv4-ipv6", availability: "1011", paths: [4]string{"tunnel", "underlay", "tunnel", "underlay"}},
+		{name: "mode-7-tunnel-ipv4-ipv6", availability: "0111", paths: [4]string{"none", "underlay", "none", "underlay"}},
+		{name: "mode-8-tunnel-ipv4-internet-ipv6", availability: "0110", paths: [4]string{"none", "tunnel", "none", "tunnel"}},
+		{name: "mode-9-internet-ipv4-tunnel-ipv6", availability: "1001", paths: [4]string{"tunnel", "none", "tunnel", "none"}},
+	}
+	modes := addressModes("2")
+	if len(modes) != len(want) {
+		t.Fatalf("address mode count = %d; want %d", len(modes), len(want))
+	}
+	for i, mode := range modes {
+		availability := ""
+		for _, address := range []netip.Addr{
+			mode.addresses.InternetIPv4, mode.addresses.TunnelIPv4,
+			mode.addresses.InternetIPv6, mode.addresses.TunnelIPv6,
+		} {
+			if address.IsValid() {
+				availability += "1"
+			} else {
+				availability += "0"
+			}
+		}
+		paths := [4]string{mode.ipv4Path, mode.ipv6Path, mode.wfpIPv4Path, mode.wfpIPv6Path}
+		if mode.name != want[i].name || availability != want[i].availability || paths != want[i].paths {
+			t.Errorf("mode %d = %q %s %v; want %q %s %v", i+1, mode.name, availability, paths, want[i].name, want[i].availability, want[i].paths)
+		}
+		for _, network := range []string{"tcp4", "udp4", "tcp6", "udp6"} {
+			if path := expectedFlowPath(mode, "included", network); path != "tunnel" {
+				t.Errorf("%s included %s path = %s; want tunnel", mode.name, network, path)
+			}
+			if path := expectedWFPPath(mode, "included", network); path != "none" {
+				t.Errorf("%s filtered included %s path = %s; want none", mode.name, network, path)
+			}
+		}
+	}
+}
+
+func expectedFlowPath(mode addressMode, role, network string) string {
 	if role == "included" {
 		return "tunnel"
 	}
-	if strings.HasSuffix(network, "4") && profile == "ipv6-only" {
-		return "tunnel"
+	if strings.HasSuffix(network, "4") {
+		return mode.ipv4Path
 	}
-	if strings.HasSuffix(network, "6") && profile == "ipv4-only" {
-		return "tunnel"
+	return mode.ipv6Path
+}
+
+func expectedWFPPath(mode addressMode, role, network string) string {
+	if role == "included" {
+		return "none"
 	}
-	return "underlay"
+	if strings.HasSuffix(network, "4") {
+		return mode.wfpIPv4Path
+	}
+	return mode.wfpIPv6Path
 }
 
 func expectedFlowAddress(path, network, suffix string) string {
@@ -339,6 +426,13 @@ func flowRemote(network string) string {
 		return flowServiceIPv4
 	}
 	return flowServiceIPv6
+}
+
+func flowDNSRemote(network string) string {
+	if strings.HasSuffix(network, "4") {
+		return flowDNSIPv4
+	}
+	return flowDNSIPv6
 }
 
 func (h *packetFlowTest) observe(phase, profile, role, network, flow, expectedPath, expectedSuffix string, response flowResponse) {
@@ -385,10 +479,17 @@ func (h *packetFlowTest) exchange(phase, profile, role, network, id, expectedPat
 	h.t.Helper()
 	token := h.token()
 	h.currentPaths[id] = token
-	response := h.processes[role].request(h.t, flowRequest{
-		Operation: "exchange", ID: id, Token: token,
-	})
-	h.observe(phase, profile, role, network, id, expectedPath, suffix, response)
+	stopDeadline := time.Now().Add(5 * time.Second)
+	for {
+		response := h.processes[role].request(h.t, flowRequest{
+			Operation: "exchange", ID: id, Token: token,
+		})
+		if response.Error != "" || !strings.HasSuffix(expectedPath, "-stopped") || time.Now().After(stopDeadline) {
+			h.observe(phase, profile, role, network, id, expectedPath, suffix, response)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (h *packetFlowTest) open(phase, profile, role, network, id, expectedPath, suffix string) {
@@ -409,27 +510,27 @@ func (h *packetFlowTest) close(role, id string) {
 }
 
 func (h *packetFlowTest) once(phase, profile, role, network, kind, expectedPath, suffix string) {
+	h.onceRemote(phase, profile, role, network, kind, expectedPath, suffix, flowRemote(network))
+}
+
+func (h *packetFlowTest) onceRemote(phase, profile, role, network, kind, expectedPath, suffix, remote string) {
 	h.t.Helper()
 	token := h.token()
 	id := strings.Join([]string{phase, profile, role, network, kind, token}, "/")
 	h.currentPaths[id] = token
 	response := h.processes[role].request(h.t, flowRequest{
-		Operation: "once", Network: network, Address: flowRemote(network), Token: token,
+		Operation: "once", Network: network, Address: remote, Token: token,
 	})
 	h.observe(phase, profile, role, network, id, expectedPath, suffix, response)
 }
 
 func addressesForProfile(profile, suffix string) splittunnel.Addresses {
-	var addresses splittunnel.Addresses
-	if profile != "ipv6-only" {
-		addresses.TunnelIPv4 = netip.MustParseAddr("198.18.0." + suffix)
-		addresses.InternetIPv4 = netip.MustParseAddr("198.18.1." + suffix)
+	for _, mode := range addressModes(suffix) {
+		if mode.name == profile || profile == "dual-stack" && mode.name == "mode-1-dual-stack" {
+			return mode.addresses
+		}
 	}
-	if profile != "ipv4-only" {
-		addresses.TunnelIPv6 = netip.MustParseAddr("fd00:18:0::" + suffix)
-		addresses.InternetIPv6 = netip.MustParseAddr("fd00:18:1::" + suffix)
-	}
-	return addresses
+	panic("unknown address profile: " + profile)
 }
 
 func (h *packetFlowTest) setProfile(profile, suffix string) {
@@ -592,22 +693,62 @@ func (h *packetFlowTest) runAddressChanges() {
 }
 
 func (h *packetFlowTest) runMatrix() {
-	for _, profile := range []string{"dual-stack", "ipv4-only", "ipv6-only"} {
-		h.setProfile(profile, "2")
+	for _, mode := range addressModes("2") {
+		if err := h.session.c.SetAddresses(context.Background(), mode.addresses); err != nil {
+			h.t.Fatal(err)
+		}
 		h.setExclusions("excluded", "parent")
 		for _, role := range []string{"excluded", "descendant", "included"} {
 			for _, network := range []string{"tcp4", "tcp6", "udp4", "udp6"} {
-				path := expectedFlowPath(profile, role, network)
-				h.once("new", profile, role, network, "request-response", path, "2")
-				id := strings.Join([]string{"stream", strconv.Itoa(h.cycle), profile, role, network}, "/")
-				h.open("stream", profile, role, network, id, path, "2")
+				path := expectedFlowPath(mode, role, network)
+				h.once("new", mode.name, role, network, "request-response", path, "2")
+				if path == "none" {
+					h.once("stream", mode.name, role, network, "long-lived-blocked", path, "2")
+					continue
+				}
+				id := strings.Join([]string{"stream", strconv.Itoa(h.cycle), mode.name, role, network}, "/")
+				h.open("stream", mode.name, role, network, id, path, "2")
 				for range 3 {
-					h.exchange("stream", profile, role, network, id, path, "2")
+					h.exchange("stream", mode.name, role, network, id, path, "2")
 				}
 				h.close(role, id)
 			}
 		}
 	}
+}
+
+func (h *packetFlowTest) runWFPInteraction() {
+	h.setExclusions("excluded", "parent")
+	h.waitRoles("excluded", "descendant")
+	for sublayer, test := range []struct {
+		name   string
+		port   uint16
+		remote func(string) string
+	}{
+		{name: "baseline-sublayer", port: 47823, remote: flowRemote},
+		{name: "dns-sublayer", port: 53, remote: flowDNSRemote},
+	} {
+		keys, err := h.session.fixture.addRestrictiveFilters(sublayer, test.port)
+		if err != nil {
+			h.t.Fatalf("add %s filters: %v", test.name, err)
+		}
+		for _, mode := range addressModes("2") {
+			if err := h.session.c.SetAddresses(context.Background(), mode.addresses); err != nil {
+				h.t.Fatal(err)
+			}
+			for _, role := range []string{"excluded", "descendant", "included"} {
+				for _, network := range []string{"tcp4", "tcp6", "udp4", "udp6"} {
+					path := expectedWFPPath(mode, role, network)
+					profile := test.name + "/" + mode.name
+					h.onceRemote("wfp", profile, role, network, "restrictive-filter", path, "2", test.remote(network))
+				}
+			}
+		}
+		if err := h.session.fixture.removeFilters(keys); err != nil {
+			h.t.Fatalf("remove %s filters: %v", test.name, err)
+		}
+	}
+	h.setProfile("dual-stack", "2")
 }
 
 func (h *packetFlowTest) reinitialize() {
@@ -637,6 +778,7 @@ func TestPacketFlowCharacterization(t *testing.T) {
 	for cycle := 1; cycle <= 2; cycle++ {
 		h.cycle = cycle
 		h.runMatrix()
+		h.runWFPInteraction()
 		h.runExclusionChanges()
 		h.runAddressChanges()
 		if cycle == 1 {

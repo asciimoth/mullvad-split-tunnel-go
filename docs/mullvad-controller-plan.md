@@ -13,11 +13,9 @@ and the disposable Windows amd64 live-driver gate pass.
 The live-driver gate covers WFP fixture creation, initialization, process
 registration, address round-trips, Unicode exclusions, descendants,
 configuration changes, events, cancellation, reset, and setup-exit recovery. The
-controller exposes all IOCTLs in the pinned driver. Remaining work closes
-ABI-fixture, process-race, address-mode, WFP-interaction, and platform
-qualification gaps before the API is frozen. The repository also needs a small
-end-to-end tunnel command that proves the library is useful outside the test
-harness and provides a complete usage example.
+controller exposes all IOCTLs in the pinned driver. The remaining work adds a
+small end-to-end tunnel command, qualifies the supported Windows matrix, and
+prepares the public API release.
 
 ## Fixed rules
 
@@ -81,10 +79,9 @@ contracts are recorded in
 
 ## Step 2: Record packet-flow behavior
 
-The isolated topology, initial automated matrix, observed contracts, and
-retained artifacts are described in
-[Controller Step 2 validation](controller-step2-validation.md). Complete the
-remaining address-mode and WFP-interaction cases before closing this step.
+This step is implemented. The isolated topology, complete automated matrix,
+observed contracts, and retained artifacts are described in
+[Controller Step 2 validation](controller-step2-validation.md).
 
 Extend the isolated live-driver harness with a controlled network topology:
 
