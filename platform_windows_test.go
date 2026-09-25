@@ -14,6 +14,10 @@ func TestResolveOwnExecutableAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	exeInfo, err := os.Stat(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
 	path, err := ResolveDevicePath(exe)
 	if err != nil || !strings.HasPrefix(strings.ToLower(path), "\\device\\") {
 		t.Fatalf("native executable path: %q, %v", path, err)
@@ -24,8 +28,15 @@ func TestResolveOwnExecutableAndSnapshot(t *testing.T) {
 	}
 	for _, p := range snapshot.Processes {
 		if p.PID == uint32(os.Getpid()) {
-			if !strings.EqualFold(p.ImagePath, path) || p.CreationTime == 0 {
+			if !strings.HasPrefix(strings.ToLower(p.ImagePath), "\\device\\") || p.CreationTime == 0 {
 				t.Fatalf("self metadata: %+v, want %q", p, path)
+			}
+			imageInfo, err := os.Stat(`\\?\GLOBALROOT` + p.ImagePath)
+			if err != nil {
+				t.Fatalf("stat snapshot image %q: %v", p.ImagePath, err)
+			}
+			if !os.SameFile(imageInfo, exeInfo) {
+				t.Fatalf("snapshot image %q is not executable %q", p.ImagePath, path)
 			}
 			return
 		}
