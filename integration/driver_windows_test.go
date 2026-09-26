@@ -312,6 +312,77 @@ func TestReadyEngagedStateTransitions(t *testing.T) {
 	requireDriverState(t, s.c, splittunnel.StateReady)
 }
 
+func TestInvalidAddressModesPreservePolicy(t *testing.T) {
+	s := newLiveSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	executable := mustExecutable(t)
+	if err := s.c.SetExcludedPaths(ctx, []string{executable}); err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := []struct {
+		name      string
+		addresses splittunnel.Addresses
+	}{
+		{
+			name: "IPv4 tunnel without Internet address",
+			addresses: splittunnel.Addresses{
+				TunnelIPv4: netip.MustParseAddr("198.18.0.2"),
+			},
+		},
+		{
+			name: "IPv6 tunnel without Internet address",
+			addresses: splittunnel.Addresses{
+				TunnelIPv6: netip.MustParseAddr("fd00:18:0::2"),
+			},
+		},
+		{
+			name: "dual-stack tunnels without Internet addresses",
+			addresses: splittunnel.Addresses{
+				TunnelIPv4: netip.MustParseAddr("198.18.0.2"),
+				TunnelIPv6: netip.MustParseAddr("fd00:18:0::2"),
+			},
+		},
+	}
+
+	assertRejected := func(phase string, wantAddresses splittunnel.Addresses) {
+		t.Helper()
+		for _, test := range invalid {
+			t.Run(phase+"/"+test.name, func(t *testing.T) {
+				if err := s.c.SetAddresses(ctx, test.addresses); err == nil {
+					t.Fatal("invalid address mode was accepted")
+				}
+				got, err := s.c.Addresses(ctx)
+				if err != nil || got != wantAddresses {
+					t.Fatalf("addresses after rejection = %+v, %v; want %+v", got, err, wantAddresses)
+				}
+			})
+		}
+	}
+
+	assertRejected("ready", splittunnel.Addresses{})
+	requireDriverState(t, s.c, splittunnel.StateReady)
+
+	valid := splittunnel.Addresses{
+		TunnelIPv4:   netip.MustParseAddr("198.18.0.2"),
+		InternetIPv4: netip.MustParseAddr("198.18.1.2"),
+		TunnelIPv6:   netip.MustParseAddr("fd00:18:0::2"),
+		InternetIPv6: netip.MustParseAddr("fd00:18:1::2"),
+	}
+	if err := s.c.SetAddresses(ctx, valid); err != nil {
+		t.Fatalf("valid address mode after rejected modes: %v", err)
+	}
+	requireDriverState(t, s.c, splittunnel.StateEngaged)
+	processStatus(t, s.c, uint32(os.Getpid()), true)
+	readExactProcessEvent(t, s.c, uint32(os.Getpid()),
+		splittunnel.EventStartSplitting, splittunnel.ReasonConfig)
+
+	assertRejected("engaged", valid)
+	requireDriverState(t, s.c, splittunnel.StateEngaged)
+	processStatus(t, s.c, uint32(os.Getpid()), true)
+}
+
 func TestShutdownResetsAndClosesController(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

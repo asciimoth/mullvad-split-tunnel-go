@@ -75,7 +75,8 @@ try {
     $required = @(
         'TestResolveOwnExecutableAndSnapshot',
         'TestTimedOutMutationsCanBeReconciled',
-        'TestConcurrentCloseRejectsQueuedAndNewOperations'
+        'TestConcurrentCloseRejectsQueuedAndNewOperations',
+        'TestCancelledEventLaneWaitDoesNotIssueIOCTL'
     )
     foreach ($test in $required) {
         if ($parsed | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'skip' }) { throw "$test was skipped" }

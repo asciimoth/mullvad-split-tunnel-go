@@ -81,6 +81,7 @@ try {
             'TestPathResolutionFailurePreservesConfiguration',
             'TestInvalidStateTransitionsPreserveDriverState',
             'TestReadyEngagedStateTransitions',
+            'TestInvalidAddressModesPreservePolicy',
             'TestInheritedProcessSurvivesParentDeparture',
             'TestConcurrentProcessArrivalsAndEventBackpressure',
             'TestShutdownResetsAndClosesController'

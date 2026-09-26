@@ -845,7 +845,14 @@ New-NetIPAddress -InterfaceIndex $t.ifIndex -IPAddress '198.18.0.%[1]s' -PrefixL
 New-NetIPAddress -InterfaceIndex $u.ifIndex -IPAddress '198.18.1.%[1]s' -PrefixLength 24|Out-Null
 New-NetIPAddress -InterfaceIndex $t.ifIndex -IPAddress 'fd00:18::%[1]s' -PrefixLength 64|Out-Null
 New-NetIPAddress -InterfaceIndex $u.ifIndex -IPAddress 'fd00:18:1::%[1]s' -PrefixLength 64|Out-Null
-Start-Sleep -Seconds 2
+$expected=@('198.18.0.%[1]s','198.18.1.%[1]s','fd00:18::%[1]s','fd00:18:1::%[1]s')
+$deadline=(Get-Date).AddSeconds(15)
+do {
+    $ready=@(Get-NetIPAddress|Where-Object { $_.IPAddress -in $expected -and $_.AddressState -eq 'Preferred' })
+    if ($ready.Count -eq $expected.Count) { break }
+    if ((Get-Date) -ge $deadline) { throw "Addresses did not become preferred: $($expected -join ', ')" }
+    Start-Sleep -Milliseconds 100
+} while ($true)
 `, suffix)
 	runAddressCommand(t, script)
 }
@@ -860,6 +867,14 @@ Remove-NetIPAddress -InterfaceIndex $t.ifIndex -IPAddress '198.18.0.%[1]s' -Conf
 Remove-NetIPAddress -InterfaceIndex $u.ifIndex -IPAddress '198.18.1.%[1]s' -Confirm:$false
 Remove-NetIPAddress -InterfaceIndex $t.ifIndex -IPAddress 'fd00:18::%[1]s' -Confirm:$false
 Remove-NetIPAddress -InterfaceIndex $u.ifIndex -IPAddress 'fd00:18:1::%[1]s' -Confirm:$false
+$removed=@('198.18.0.%[1]s','198.18.1.%[1]s','fd00:18::%[1]s','fd00:18:1::%[1]s')
+$deadline=(Get-Date).AddSeconds(15)
+do {
+    $remaining=@(Get-NetIPAddress|Where-Object { $_.IPAddress -in $removed })
+    if ($remaining.Count -eq 0) { break }
+    if ((Get-Date) -ge $deadline) { throw "Addresses were not removed: $($removed -join ', ')" }
+    Start-Sleep -Milliseconds 100
+} while ($true)
 `, suffix)
 	runAddressCommand(t, script)
 }

@@ -384,6 +384,48 @@ func TestCancelledCommandLaneWaitDoesNotIssueIOCTL(t *testing.T) {
 	}
 }
 
+func TestCancelledEventLaneWaitDoesNotIssueIOCTL(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	d := &functionTransport{
+		fn: func(_ context.Context, code uint32, _, output []byte) (uint32, error) {
+			if code != ioctlDequeueEvent {
+				return 0, fmt.Errorf("unexpected IOCTL %#x", code)
+			}
+			if calls.Add(1) != 1 {
+				return 0, errors.New("queued event reader issued an IOCTL")
+			}
+			close(started)
+			<-release
+			reply := unhex(t, loadFixture(t).Events.Start)
+			copy(output, reply)
+			return uint32(len(reply)), nil
+		},
+		onClose: func() error { return nil },
+	}
+	c := newController(d)
+	defer closeController(t, c)
+	first := make(chan error, 1)
+	go func() {
+		_, err := c.ReadEvent(context.Background())
+		first <- err
+	}()
+	<-started
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.ReadEvent(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled event lane wait: %v", err)
+	}
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("IOCTL calls = %d; want 1", got)
+	}
+}
+
 func TestShutdownClosesEvenIfResetFails(t *testing.T) {
 	resetErr := errors.New("driver reset failed")
 	d := &scriptedTransport{steps: []step{{code: ioctlReset, err: resetErr}}}
