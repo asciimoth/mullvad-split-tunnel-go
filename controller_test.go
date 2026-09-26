@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -524,6 +525,11 @@ func TestSetExcludedPathsChecksBoundsAndCancellationFirst(t *testing.T) {
 	d := &scriptedTransport{}
 	c := newController(d)
 	defer closeController(t, c)
+	var resolutions atomic.Int32
+	c.resolve = func(string) (string, error) {
+		resolutions.Add(1)
+		return `\Device\X\app.exe`, nil
+	}
 	if err := c.SetExcludedPaths(context.Background(), make([]string, maxRecords+1)); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("too many paths: %v", err)
 	}
@@ -531,6 +537,354 @@ func TestSetExcludedPathsChecksBoundsAndCancellationFirst(t *testing.T) {
 	cancel()
 	if err := c.SetExcludedPaths(ctx, []string{"not-an-absolute-path"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled resolution: %v", err)
+	}
+	if got := resolutions.Load(); got != 0 {
+		t.Fatalf("resolver calls = %d; want 0", got)
+	}
+}
+
+func TestSetExcludedPathsResolutionDoesNotHoldCommandLane(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var stateCalls atomic.Int32
+	var setCalls atomic.Int32
+	d := &functionTransport{
+		fn: func(_ context.Context, code uint32, input, output []byte) (uint32, error) {
+			switch code {
+			case ioctlGetState:
+				stateCalls.Add(1)
+				copy(output, stateReply(StateReady))
+				return 8, nil
+			case ioctlSetConfiguration:
+				paths, err := decodeConfiguration(input)
+				if err != nil || !reflect.DeepEqual(paths, []string{`\Device\X\app.exe`}) {
+					return 0, fmt.Errorf("configuration = %v, %v", paths, err)
+				}
+				setCalls.Add(1)
+				return 0, nil
+			default:
+				return 0, fmt.Errorf("unexpected IOCTL %#x", code)
+			}
+		},
+		onClose: func() error { return nil },
+	}
+	c := newController(d)
+	defer closeController(t, c)
+	c.resolve = func(string) (string, error) {
+		close(started)
+		<-release
+		return `\Device\X\app.exe`, nil
+	}
+
+	setResult := make(chan error, 1)
+	go func() {
+		setResult <- c.SetExcludedPaths(context.Background(), []string{`C:\app.exe`})
+	}()
+	<-started
+	queryCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if state, err := c.State(queryCtx); err != nil || state != StateReady {
+		t.Fatalf("state while resolver is blocked = %s, %v", state, err)
+	}
+	close(release)
+	if err := <-setResult; err != nil {
+		t.Fatal(err)
+	}
+	if got := stateCalls.Load(); got != 2 {
+		t.Fatalf("state calls = %d; want command plus mutation precheck", got)
+	}
+	if got := setCalls.Load(); got != 1 {
+		t.Fatalf("configuration calls = %d; want 1", got)
+	}
+}
+
+func TestSetExcludedPathsCancellationAbandonsBlockedResolver(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		cancel func(context.Context) (context.Context, context.CancelFunc)
+	}{
+		{"explicit", func(context.Context) (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		}},
+		{"deadline", func(context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 50*time.Millisecond)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			started := make(chan struct{})
+			release := make(chan struct{})
+			workerDone := make(chan struct{})
+			var calls atomic.Int32
+			d := &functionTransport{
+				fn: func(context.Context, uint32, []byte, []byte) (uint32, error) {
+					calls.Add(1)
+					return 0, errors.New("IOCTL issued after abandoned resolution")
+				},
+				onClose: func() error { return nil },
+			}
+			c := newController(d)
+			c.resolve = func(string) (string, error) {
+				close(started)
+				<-release
+				close(workerDone)
+				return `\Device\X\late.exe`, nil
+			}
+			ctx, cancel := test.cancel(context.Background())
+			result := make(chan error, 1)
+			go func() { result <- c.SetExcludedPaths(ctx, []string{`C:\late.exe`}) }()
+			<-started
+			if test.name == "explicit" {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("abandoned resolution = %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("cancellation waited for blocked resolver")
+			}
+			if err := c.Close(); err != nil {
+				t.Fatal(err)
+			}
+			close(release)
+			select {
+			case <-workerDone:
+			case <-time.After(time.Second):
+				t.Fatal("resolver worker did not finish after release")
+			}
+			if got := calls.Load(); got != 0 {
+				t.Fatalf("IOCTL calls after cancellation = %d", got)
+			}
+		})
+	}
+}
+
+func TestSetExcludedPathsBoundsAbandonedResolverWorkers(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan struct{})
+	var resolutions atomic.Int32
+	d := &functionTransport{
+		fn: func(context.Context, uint32, []byte, []byte) (uint32, error) {
+			return 0, errors.New("unexpected IOCTL")
+		},
+		onClose: func() error { return nil },
+	}
+	c := newController(d)
+	defer closeController(t, c)
+	c.resolve = func(string) (string, error) {
+		if resolutions.Add(1) != 1 {
+			return "", errors.New("started a second resolver while the first was blocked")
+		}
+		close(firstStarted)
+		<-releaseFirst
+		close(firstDone)
+		return `\Device\X\late.exe`, nil
+	}
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstResult := make(chan error, 1)
+	go func() {
+		firstResult <- c.SetExcludedPaths(firstCtx, []string{`C:\first.exe`})
+	}()
+	<-firstStarted
+	cancelFirst()
+	if err := <-firstResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first abandoned resolution = %v", err)
+	}
+
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelSecond()
+	err := c.SetExcludedPaths(secondCtx, []string{`C:\second.exe`})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second resolution wait = %v", err)
+	}
+	if got := resolutions.Load(); got != 1 {
+		t.Fatalf("resolver workers = %d; want 1", got)
+	}
+	close(releaseFirst)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first resolver did not finish after release")
+	}
+}
+
+func TestCloseAbandonsBlockedPathResolution(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	workerDone := make(chan struct{})
+	var closes atomic.Int32
+	d := &functionTransport{
+		fn: func(context.Context, uint32, []byte, []byte) (uint32, error) {
+			return 0, errors.New("unexpected IOCTL")
+		},
+		onClose: func() error { closes.Add(1); return nil },
+	}
+	c := newController(d)
+	c.resolve = func(string) (string, error) {
+		close(started)
+		<-release
+		close(workerDone)
+		return `\Device\X\late.exe`, nil
+	}
+	setResult := make(chan error, 1)
+	go func() {
+		setResult <- c.SetExcludedPaths(context.Background(), []string{`C:\late.exe`})
+	}()
+	<-started
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- c.Close() }()
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close waited for blocked resolver")
+	}
+	select {
+	case err := <-setResult:
+		if !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("close-abandoned resolution = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not release SetExcludedPaths")
+	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("transport closes = %d; want 1", got)
+	}
+	close(release)
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("resolver worker did not finish after release")
+	}
+}
+
+func TestShutdownDoesNotWaitForBlockedPathResolution(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	workerDone := make(chan struct{})
+	var resets atomic.Int32
+	var closes atomic.Int32
+	d := &functionTransport{
+		fn: func(_ context.Context, code uint32, _, _ []byte) (uint32, error) {
+			if code != ioctlReset {
+				return 0, fmt.Errorf("unexpected IOCTL %#x", code)
+			}
+			resets.Add(1)
+			return 0, nil
+		},
+		onClose: func() error { closes.Add(1); return nil },
+	}
+	c := newController(d)
+	c.resolve = func(string) (string, error) {
+		close(started)
+		<-release
+		close(workerDone)
+		return `\Device\X\late.exe`, nil
+	}
+	setResult := make(chan error, 1)
+	go func() {
+		setResult <- c.SetExcludedPaths(context.Background(), []string{`C:\late.exe`})
+	}()
+	<-started
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- c.Shutdown(context.Background()) }()
+	select {
+	case err := <-shutdownResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown waited for blocked resolver")
+	}
+	if err := <-setResult; !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("shutdown-abandoned resolution = %v", err)
+	}
+	if resets.Load() != 1 || closes.Load() != 1 {
+		t.Fatalf("reset/close calls = %d/%d; want 1/1", resets.Load(), closes.Load())
+	}
+	close(release)
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("resolver worker did not finish after release")
+	}
+}
+
+func TestSetExcludedPathsOwnsInputAndResolvesAllBeforeMutation(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	seen := make(chan string, 2)
+	d := &scriptedTransport{steps: []step{
+		{code: ioctlGetState, outputSize: 8, reply: stateReply(StateReady)},
+	}}
+	c := newController(d)
+	defer closeController(t, c)
+	c.resolve = func(path string) (string, error) {
+		seen <- path
+		if path == `C:\first.exe` {
+			close(firstStarted)
+			<-releaseFirst
+			return `\Device\X\first.exe`, nil
+		}
+		return `\Device\X\second.exe`, nil
+	}
+	encoded, err := encodeConfiguration([]string{`\Device\X\first.exe`, `\Device\X\second.exe`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.steps = append(d.steps, step{code: ioctlSetConfiguration, input: encoded})
+	paths := []string{`C:\first.exe`, `C:\second.exe`}
+	result := make(chan error, 1)
+	go func() { result <- c.SetExcludedPaths(context.Background(), paths) }()
+	<-firstStarted
+	paths[1] = `C:\mutated.exe`
+	close(releaseFirst)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if first, second := <-seen, <-seen; first != `C:\first.exe` || second != `C:\second.exe` {
+		t.Fatalf("resolver saw %q and %q", first, second)
+	}
+}
+
+func TestSetExcludedPathsResolutionFailureDoesNotChangePolicy(t *testing.T) {
+	resolverErr := errors.New("resolver failed")
+	var calls atomic.Int32
+	d := &functionTransport{
+		fn: func(context.Context, uint32, []byte, []byte) (uint32, error) {
+			calls.Add(1)
+			return 0, errors.New("unexpected IOCTL")
+		},
+		onClose: func() error { return nil },
+	}
+	c := newController(d)
+	defer closeController(t, c)
+	var resolved atomic.Int32
+	c.resolve = func(path string) (string, error) {
+		resolved.Add(1)
+		if path == `C:\bad.exe` {
+			return "", resolverErr
+		}
+		return `\Device\X\good.exe`, nil
+	}
+	err := c.SetExcludedPaths(context.Background(), []string{
+		`C:\good.exe`, `C:\bad.exe`, `C:\never.exe`,
+	})
+	if !errors.Is(err, resolverErr) || !strings.Contains(err.Error(), "resolve path 1") {
+		t.Fatalf("resolution failure = %v", err)
+	}
+	if got := resolved.Load(); got != 2 {
+		t.Fatalf("resolver calls = %d; want 2", got)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("IOCTL calls after resolution failure = %d", got)
 	}
 }
 

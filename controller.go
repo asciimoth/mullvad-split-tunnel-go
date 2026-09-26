@@ -19,8 +19,10 @@ type Controller struct {
 	device   transport
 	life     context.Context
 	cancel   context.CancelFunc
+	resolve  func(string) (string, error)
 	commands chan struct{}
 	events   chan struct{}
+	pathJobs chan struct{}
 
 	mu        sync.Mutex
 	closed    bool
@@ -33,7 +35,9 @@ func newController(device transport) *Controller {
 	life, cancel := context.WithCancel(context.Background())
 	return &Controller{
 		device: device, life: life, cancel: cancel,
+		resolve:  ResolveDevicePath,
 		commands: make(chan struct{}, 1), events: make(chan struct{}, 1),
+		pathJobs: make(chan struct{}, 1),
 	}
 }
 
@@ -239,25 +243,94 @@ func (c *Controller) setExcludedDevicePaths(ctx context.Context, paths []string)
 	return err
 }
 
-// SetExcludedPaths resolves existing absolute executable paths before changing
-// driver policy. A resolution error leaves the exclusion set untouched.
-// Resolution is synchronous filesystem work and is not forcibly cancellable.
-func (c *Controller) SetExcludedPaths(ctx context.Context, paths []string) error {
-	return c.run(ctx, false, "resolve and set exclusions", func(ctx context.Context) error {
-		if len(paths) > maxRecords {
-			return fmt.Errorf("%w: too many paths", ErrInvalidArgument)
+type pathResolution struct {
+	paths []string
+	err   error
+}
+
+func (c *Controller) resolveExcludedPaths(ctx context.Context, paths []string) ([]string, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil context", ErrInvalidArgument)
+	}
+	if c == nil {
+		return nil, os.ErrClosed
+	}
+	c.mu.Lock()
+	if c.closed || c.device == nil {
+		c.mu.Unlock()
+		return nil, os.ErrClosed
+	}
+	life, resolve, lane := c.life, c.resolve, c.pathJobs
+	c.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(paths) > maxRecords {
+		return nil, fmt.Errorf("%w: too many paths", ErrInvalidArgument)
+	}
+	select {
+	case lane <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-life.Done():
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		resolved := make([]string, len(paths))
-		for i, path := range paths {
+		return nil, os.ErrClosed
+	}
+	// The worker can outlive this call when a Windows filesystem operation does
+	// not return. Give it an independent input slice and a buffered result channel
+	// so that cancellation never makes the worker retain the caller's slice or
+	// block. Keep the path lane until the worker ends to bound abandoned workers.
+	owned := append([]string(nil), paths...)
+	result := make(chan pathResolution, 1)
+	go func() {
+		defer func() { <-lane }()
+		resolved := make([]string, len(owned))
+		for i, path := range owned {
 			if err := ctx.Err(); err != nil {
-				return err
+				result <- pathResolution{err: err}
+				return
+			}
+			if err := life.Err(); err != nil {
+				result <- pathResolution{err: os.ErrClosed}
+				return
 			}
 			var err error
-			resolved[i], err = ResolveDevicePath(path)
+			resolved[i], err = resolve(path)
 			if err != nil {
-				return fmt.Errorf("resolve path %d: %w", i, err)
+				result <- pathResolution{err: fmt.Errorf("resolve path %d: %w", i, err)}
+				return
 			}
 		}
+		result <- pathResolution{paths: resolved}
+	}()
+
+	select {
+	case resolved := <-result:
+		return resolved.paths, resolved.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-life.Done():
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, os.ErrClosed
+	}
+}
+
+// SetExcludedPaths resolves existing absolute executable paths before changing
+// driver policy. A resolution error leaves the exclusion set untouched. Path
+// resolution does not hold the controller command lane. A context cancellation
+// or Close abandons a blocked filesystem call; the detached resolver can remain
+// blocked until Windows completes that call.
+func (c *Controller) SetExcludedPaths(ctx context.Context, paths []string) error {
+	resolved, err := c.resolveExcludedPaths(ctx, paths)
+	if err != nil {
+		return fmt.Errorf("splittunnel: resolve and set exclusions: %w", err)
+	}
+	return c.run(ctx, false, "resolve and set exclusions", func(ctx context.Context) error {
 		return c.setExcludedDevicePaths(ctx, resolved)
 	})
 }

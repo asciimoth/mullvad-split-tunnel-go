@@ -318,6 +318,29 @@ func TestEventErrorsAndUnknownIDs(t *testing.T) {
 	}
 }
 
+func TestPinnedDriverSplittingErrorCompatibility(t *testing.T) {
+	// Driver 1.3.0.0 calls BuildSplittingErrorEvent(..., false) from both
+	// BuildStartSplittingErrorEvent and BuildStopSplittingErrorEvent. Consumers
+	// must therefore handle both ABI values as a direction-unknown process error.
+	for _, id := range []EventID{EventErrorStartSplitting, EventErrorStopSplitting} {
+		b := make([]byte, eventHeaderSize+10)
+		le.PutUint32(b, uint32(id))
+		le.PutUint64(b[8:], 10)
+		le.PutUint64(b[eventHeaderSize:], 42)
+		event, err := decodeEvent(b)
+		if err != nil || event.ID != id || event.PID != 42 || !event.ID.IsSplittingError() {
+			t.Fatalf("splitting error %#x = %+v, %v", id, event, err)
+		}
+	}
+	for _, id := range []EventID{
+		EventStartSplitting, EventStopSplitting, EventErrorMessage, EventID(0x80000004),
+	} {
+		if id.IsSplittingError() {
+			t.Errorf("non-splitting error ID %#x reported as splitting error", id)
+		}
+	}
+}
+
 func TestSnapshotDoesNotInheritFromRecycledPID(t *testing.T) {
 	input := []Process{
 		{PID: 30, ParentPID: 10, CreationTime: 100},

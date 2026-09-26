@@ -21,12 +21,16 @@
 // The package limits each encoded or decoded IOCTL buffer to 16 MiB and each
 // process or exclusion list to 65,536 records. SetExcludedPaths accepts existing
 // absolute local drive-letter paths. It does not accept UNC or other network
-// paths. Exclusions match exact resolved NT paths, not file identities.
+// paths. Exclusions match exact resolved NT paths, not file identities. Path
+// resolution does not block controller commands. Cancellation can abandon a
+// resolver while its synchronous Windows filesystem call finishes in the
+// background.
 //
 // The upstream driver cannot attribute ordinary system-resolver DNS traffic to
 // the process that requested it. It also has known limits for localhost UDP and
-// multicast reception from excluded processes. See the module README before
-// using the package in a VPN client.
+// multicast reception from excluded processes. Driver 1.3.0.0 also labels both
+// start- and stop-splitting failures as EventErrorStopSplitting. See the module
+// README before using the package in a VPN client.
 //
 // Executable exclusions apply to descendants as determined by the driver.
 // This is not a general packet-capture, PID-routing, include-only routing,

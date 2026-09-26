@@ -179,7 +179,10 @@ Windows build does not qualify an entry.
 - Each encoded or decoded IOCTL buffer has a 16 MiB local limit. A process
   snapshot or exclusion configuration has a 65,536-record local limit.
 - `SetExcludedPaths` accepts existing absolute local drive-letter paths. The
-  resolver does not support UNC or other network executable paths.
+  resolver does not support UNC or other network executable paths. Resolution
+  runs outside the controller command lane. Cancellation abandons the wait, but
+  a blocked synchronous Windows filesystem call can continue in a background
+  goroutine until Windows completes it.
 - Exclusions use the exact resolved NT device path. They do not use file
   identity. A rename, replacement, hard link, or volume remount can require a
   configuration update. A hard-link path must be excluded separately.
@@ -193,8 +196,11 @@ Windows build does not qualify an entry.
 - Multicast reception can fail without an API error because the redirected
   socket bind and the `inaddr_any` group membership do not match. There is no
   general workaround.
+- Driver 1.3.0.0 incorrectly labels both start- and stop-splitting failures as
+  `EventErrorStopSplitting`. Handle both error IDs with
+  `EventID.IsSplittingError` and do not infer the failed direction from the ID.
 
-These last three items are limitations of the pinned upstream driver. The
+These last four items are limitations of the pinned upstream driver. The
 isolated port-53 tests qualify WFP filter arbitration only; they do not qualify
 Windows resolver behavior, localhost UDP, or multicast reception.
 

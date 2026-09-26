@@ -144,12 +144,21 @@ type ProcessStatus struct {
 type EventID uint32
 
 const (
-	EventStartSplitting      EventID = 0
-	EventStopSplitting       EventID = 1
+	EventStartSplitting EventID = 0
+	EventStopSplitting  EventID = 1
+	// EventErrorStartSplitting is defined by the ABI, but the pinned 1.3.0.0
+	// driver incorrectly emits EventErrorStopSplitting for start failures too.
 	EventErrorStartSplitting EventID = 0x80000001
 	EventErrorStopSplitting  EventID = 0x80000002
 	EventErrorMessage        EventID = 0x80000003
 )
+
+// IsSplittingError reports whether id contains a process splitting error.
+// Do not use the specific error ID to infer the failed direction with the
+// pinned driver: it labels both start and stop failures as stop failures.
+func (id EventID) IsSplittingError() bool {
+	return id == EventErrorStartSplitting || id == EventErrorStopSplitting
+}
 
 // Reason is a bit field that explains a process-classification event.
 type Reason uint32
