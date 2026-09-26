@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,13 +48,18 @@ func resourcesGrowPersistently(measurements []resourceCounts) bool {
 
 func processResourceCounts(t *testing.T) resourceCounts {
 	t.Helper()
+	return resourceCounts{handles: processHandleCount(t), goroutines: runtime.NumGoroutine()}
+}
+
+func processHandleCount(t *testing.T) uint32 {
+	t.Helper()
 	handle, _, _ := getCurrentProcess.Call()
 	var handles uint32
 	ok, _, err := getProcessHandleCount.Call(handle, uintptr(unsafe.Pointer(&handles)))
 	if ok == 0 {
 		t.Fatalf("GetProcessHandleCount: %v", err)
 	}
-	return resourceCounts{handles: handles, goroutines: runtime.NumGoroutine()}
+	return handles
 }
 
 func driverGUID(t *testing.T, g string) splittunnel.GUID {
@@ -114,10 +120,25 @@ func TestResourcesGrowPersistently(t *testing.T) {
 }
 
 func TestHelperProcess(t *testing.T) {
-	if os.Getenv("SPLIT_TUNNEL_HELPER") != "1" {
+	switch os.Getenv("SPLIT_TUNNEL_HELPER") {
+	case "":
 		return
+	case "1":
+		time.Sleep(45 * time.Second)
+	case "spawn-child":
+		child := exec.Command(os.Getenv("SPLIT_TUNNEL_HELPER_CHILD"), "-test.run=^TestHelperProcess$")
+		child.Env = append(os.Environ(), "SPLIT_TUNNEL_HELPER=1")
+		if err := child.Start(); err != nil {
+			t.Fatal(err)
+		}
+		pid := []byte(strconv.Itoa(child.Process.Pid))
+		if err := os.WriteFile(os.Getenv("SPLIT_TUNNEL_HELPER_PID_FILE"), pid, 0o600); err != nil {
+			_ = child.Process.Kill()
+			t.Fatal(err)
+		}
+	default:
+		t.Fatalf("unknown helper mode %q", os.Getenv("SPLIT_TUNNEL_HELPER"))
 	}
-	time.Sleep(45 * time.Second)
 }
 
 func TestInjectedSetupFailureRecovery(t *testing.T) {
@@ -210,6 +231,77 @@ func TestInvalidStateTransitionsPreserveDriverState(t *testing.T) {
 		t.Fatalf("zero PID query error = %v; want ErrInvalidArgument", err)
 	}
 	wantState(splittunnel.StateReady)
+}
+
+func requireDriverState(t *testing.T, c *splittunnel.Controller, want splittunnel.State) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	got, err := c.State(ctx)
+	if err != nil || got != want {
+		t.Fatalf("driver state = %v, %v; want %v", got, err, want)
+	}
+}
+
+func TestReadyEngagedStateTransitions(t *testing.T) {
+	s := newLiveSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	active := splittunnel.Addresses{
+		TunnelIPv4:   netip.MustParseAddr("198.18.0.2"),
+		InternetIPv4: netip.MustParseAddr("198.18.1.2"),
+	}
+	inactive := splittunnel.Addresses{
+		InternetIPv4: netip.MustParseAddr("198.18.1.2"),
+	}
+	executable := mustExecutable(t)
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	excluded := t.TempDir() + `\not-running.exe`
+	if err := os.WriteFile(excluded, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pinned driver engages only when configuration is nonempty and at
+	// least one tunnel address is available. Exercise both update orders.
+	if err := s.c.SetAddresses(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	requireDriverState(t, s.c, splittunnel.StateReady)
+	if err := s.c.SetExcludedPaths(ctx, []string{excluded}); err != nil {
+		t.Fatal(err)
+	}
+	requireDriverState(t, s.c, splittunnel.StateEngaged)
+
+	if err := s.c.SetAddresses(ctx, inactive); err != nil {
+		t.Fatal(err)
+	}
+	requireDriverState(t, s.c, splittunnel.StateReady)
+	if got, err := s.c.ExcludedDevicePaths(ctx); err != nil || len(got) != 1 {
+		t.Fatalf("configuration after disengage = %v, %v; want one path", got, err)
+	}
+	if err := s.c.SetAddresses(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	requireDriverState(t, s.c, splittunnel.StateEngaged)
+
+	if err := s.c.ClearConfiguration(ctx); err != nil {
+		t.Fatal(err)
+	}
+	requireDriverState(t, s.c, splittunnel.StateReady)
+	if got, err := s.c.Addresses(ctx); err != nil || got != active {
+		t.Fatalf("addresses after clear = %+v, %v; want %+v", got, err, active)
+	}
+	if err := s.c.SetExcludedPaths(ctx, []string{excluded}); err != nil {
+		t.Fatal(err)
+	}
+	requireDriverState(t, s.c, splittunnel.StateEngaged)
+	if err := s.c.SetAddresses(ctx, splittunnel.Addresses{}); err != nil {
+		t.Fatal(err)
+	}
+	requireDriverState(t, s.c, splittunnel.StateReady)
 }
 
 func TestShutdownResetsAndClosesController(t *testing.T) {
@@ -352,6 +444,34 @@ func readExactProcessEvent(
 			t.Fatalf("event for PID %d: %#v; want ID %v and reason %v", pid, event, id, reason)
 		}
 		return event
+	}
+}
+
+func beginPendingEventRead(t *testing.T, c *splittunnel.Controller, ctx context.Context) <-chan error {
+	t.Helper()
+	before := processHandleCount(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.ReadEvent(ctx)
+		done <- err
+	}()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case err := <-done:
+			t.Fatalf("event read completed before it became pending: %v", err)
+		case <-poll.C:
+			// windowsTransport creates one event handle for each overlapped
+			// DeviceIoControl call and retains it until completion.
+			if processHandleCount(t) > before {
+				return done
+			}
+		case <-deadline.C:
+			t.Fatal("event read did not become pending")
+		}
 	}
 }
 
@@ -513,17 +633,111 @@ func TestArrivalAndDepartureEventReasons(t *testing.T) {
 		splittunnel.ReasonDeparting)
 }
 
+func spawnOrphanedHelper(t *testing.T, parentPath, childPath string) uint32 {
+	t.Helper()
+	pidFile := t.TempDir() + `\child.pid`
+	parent := exec.Command(parentPath, "-test.run=^TestHelperProcess$")
+	parent.Env = append(os.Environ(),
+		"SPLIT_TUNNEL_HELPER=spawn-child",
+		"SPLIT_TUNNEL_HELPER_CHILD="+childPath,
+		"SPLIT_TUNNEL_HELPER_PID_FILE="+pidFile,
+	)
+	if output, err := parent.CombinedOutput(); err != nil {
+		t.Fatalf("spawn orphaned helper: %v\n%s", err, output)
+	}
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid64, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32)
+	if err != nil {
+		t.Fatalf("parse orphaned helper PID %q: %v", b, err)
+	}
+	process, err := os.FindProcess(int(pid64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = process.Kill()
+		_ = process.Release()
+	})
+	return uint32(pid64)
+}
+
+func TestInheritedProcessSurvivesParentDeparture(t *testing.T) {
+	s := newLiveSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.c.SetAddresses(ctx, splittunnel.Addresses{
+		TunnelIPv4:   netip.MustParseAddr("198.18.0.2"),
+		InternetIPv4: netip.MustParseAddr("198.18.1.2"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	executable := mustExecutable(t)
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	parentPath := directory + `\parent.exe`
+	childPath := directory + `\child.exe`
+	replacementPath := directory + `\replacement.exe`
+	for _, path := range []string{parentPath, childPath, replacementPath} {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.c.SetExcludedPaths(ctx, []string{parentPath}); err != nil {
+		t.Fatal(err)
+	}
+	childPID := spawnOrphanedHelper(t, parentPath, childPath)
+	childDevicePath, err := splittunnel.ResolveDevicePath(childPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var status splittunnel.ProcessStatus
+	for {
+		status, err = s.c.QueryProcess(ctx, childPID)
+		if err == nil && status.Split && status.ParentPID == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("orphaned child %d was not retained as split: %+v, %v", childPID, status, err)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if !strings.EqualFold(status.ImagePath, childDevicePath) {
+		t.Fatalf("orphaned child image = %q; want %q", status.ImagePath, childDevicePath)
+	}
+	readExactProcessEvent(t, s.c, childPID, splittunnel.EventStartSplitting,
+		splittunnel.ReasonInheritance|splittunnel.ReasonArriving)
+
+	// Upstream intentionally retains inherited classification after the parent
+	// record departs, because the ancestry can no longer be reconstructed.
+	if err := s.c.SetExcludedPaths(ctx, []string{replacementPath}); err != nil {
+		t.Fatal(err)
+	}
+	status = processStatus(t, s.c, childPID, true)
+	if status.ParentPID != 0 {
+		t.Fatalf("orphaned child parent PID = %d; want zero", status.ParentPID)
+	}
+
+	if err := s.c.ClearConfiguration(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitProcessSplit(t, s.c, childPID, false)
+	readExactProcessEvent(t, s.c, childPID, splittunnel.EventStopSplitting,
+		splittunnel.ReasonConfig)
+}
+
 func TestResetCompletesPendingEventRead(t *testing.T) {
 	s := newLiveSession(t)
-	done := make(chan error, 1)
-	started := make(chan struct{})
-	go func() {
-		close(started)
-		_, err := s.c.ReadEvent(context.Background())
-		done <- err
-	}()
-	<-started
-	time.Sleep(10 * time.Millisecond)
+	eventCtx, eventCancel := context.WithCancel(context.Background())
+	defer eventCancel()
+	done := beginPendingEventRead(t, s.c, eventCtx)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := s.c.Reset(ctx); err != nil {
@@ -546,17 +760,8 @@ func TestResetCompletesPendingEventRead(t *testing.T) {
 func cancelBlockedEvent(t *testing.T, c *splittunnel.Controller, checkControl bool) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	started := make(chan struct{})
-	go func() {
-		close(started)
-		_, err := c.ReadEvent(ctx)
-		done <- err
-	}()
-	<-started
-	// Give DeviceIoControl time to enter the pending state. The request cannot
-	// complete because these stress sessions never install an exclusion.
-	time.Sleep(2 * time.Millisecond)
+	defer cancel()
+	done := beginPendingEventRead(t, c, ctx)
 	if checkControl {
 		controlCtx, controlCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer controlCancel()
@@ -708,15 +913,9 @@ func TestExtendedControllerSession(t *testing.T) {
 
 func TestEventCancellationWhileControllerCloses(t *testing.T) {
 	s := newLiveSession(t)
-	done := make(chan error, 1)
-	started := make(chan struct{})
-	go func() {
-		close(started)
-		_, err := s.c.ReadEvent(context.Background())
-		done <- err
-	}()
-	<-started
-	time.Sleep(10 * time.Millisecond)
+	eventCtx, eventCancel := context.WithCancel(context.Background())
+	defer eventCancel()
+	done := beginPendingEventRead(t, s.c, eventCtx)
 	if err := s.c.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -900,14 +1099,7 @@ func runLifecycle(t *testing.T) {
 	// this state so an earlier event cannot race cancellation and make the test
 	// nondeterministic. A control query must continue while the event lane waits.
 	eventCtx, eventCancel := context.WithCancel(ctx)
-	eventDone := make(chan error, 1)
-	eventStarted := make(chan struct{})
-	go func() {
-		close(eventStarted)
-		_, err := c.ReadEvent(eventCtx)
-		eventDone <- err
-	}()
-	<-eventStarted
+	eventDone := beginPendingEventRead(t, c, eventCtx)
 	if _, err := c.Addresses(ctx); err != nil {
 		t.Fatalf("control operation during event wait: %v", err)
 	}

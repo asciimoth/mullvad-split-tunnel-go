@@ -265,6 +265,73 @@ func TestCloseCancelsAndDrainsEventsWithoutBlockingControl(t *testing.T) {
 	}
 }
 
+func TestConcurrentCloseRejectsQueuedAndNewOperations(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	var closes atomic.Int32
+	d := &functionTransport{
+		fn: func(ctx context.Context, code uint32, _, _ []byte) (uint32, error) {
+			if code != ioctlGetState {
+				return 0, fmt.Errorf("unexpected IOCTL %#x", code)
+			}
+			if calls.Add(1) != 1 {
+				return 0, errors.New("queued operation issued an IOCTL during close")
+			}
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			<-release
+			return 0, ctx.Err()
+		},
+		onClose: func() error {
+			closes.Add(1)
+			return nil
+		},
+	}
+	c := newController(d)
+	const waiters = 32
+	results := make(chan error, waiters)
+	for range waiters {
+		go func() {
+			_, err := c.State(context.Background())
+			results <- err
+		}()
+	}
+	<-started
+
+	const closers = 8
+	closeResults := make(chan error, closers)
+	for range closers {
+		go func() { closeResults <- c.Close() }()
+	}
+	<-canceled
+	for range waiters {
+		if _, err := c.State(context.Background()); !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("new operation during close = %v; want os.ErrClosed", err)
+		}
+	}
+	close(release)
+
+	for range waiters {
+		if err := <-results; !errors.Is(err, os.ErrClosed) {
+			t.Errorf("operation racing close = %v; want os.ErrClosed", err)
+		}
+	}
+	for range closers {
+		if err := <-closeResults; err != nil {
+			t.Errorf("concurrent Close = %v", err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("IOCTL calls = %d; want 1", got)
+	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("transport closes = %d; want 1", got)
+	}
+}
+
 func TestCancelledRequestDoesNotIssueIOCTL(t *testing.T) {
 	d := &scriptedTransport{}
 	c := newController(d)

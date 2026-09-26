@@ -80,6 +80,8 @@ try {
             'TestInjectedSetupFailureRecovery',
             'TestPathResolutionFailurePreservesConfiguration',
             'TestInvalidStateTransitionsPreserveDriverState',
+            'TestReadyEngagedStateTransitions',
+            'TestInheritedProcessSurvivesParentDeparture',
             'TestShutdownResetsAndClosesController'
         )
     }

@@ -72,7 +72,11 @@ try {
     $ErrorActionPreference = $savedPreference
     if ($testExitCode -ne 0) { throw "tests failed with exit code $testExitCode" }
     $parsed = @(Get-Content $events | Where-Object { $_ -match '^\s*\{' } | ConvertFrom-Json)
-    $required = @('TestResolveOwnExecutableAndSnapshot', 'TestTimedOutMutationsCanBeReconciled')
+    $required = @(
+        'TestResolveOwnExecutableAndSnapshot',
+        'TestTimedOutMutationsCanBeReconciled',
+        'TestConcurrentCloseRejectsQueuedAndNewOperations'
+    )
     foreach ($test in $required) {
         if ($parsed | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'skip' }) { throw "$test was skipped" }
         if (-not ($parsed | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'pass' })) { throw "$test has no pass event" }

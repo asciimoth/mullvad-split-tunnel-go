@@ -76,7 +76,14 @@ func (c *Controller) run(ctx context.Context, event bool, operation string, f fu
 	select {
 	case lane <- struct{}{}:
 		defer func() { <-lane }()
-		if err = opctx.Err(); err == nil {
+		err = opctx.Err()
+		// context.AfterFunc can run after a queued operation acquires its lane.
+		// Observe the lifetime context directly so Close cannot permit one more
+		// IOCTL during that scheduling window.
+		if err == nil && c.life.Err() != nil {
+			err = context.Canceled
+		}
+		if err == nil {
 			err = f(opctx)
 		}
 	case <-opctx.Done():
