@@ -13,6 +13,13 @@
 // before releasing its WFP resources. Cancellation of a mutating operation
 // does not imply that the driver rolled the operation back.
 //
+// The normal state sequence is Started, Initialized, Ready, then Engaged.
+// Initialize enters Initialized. RegisterProcesses enters Ready. A nonempty
+// exclusion set plus a supported set of tunnel and Internet addresses enters
+// Engaged. Clearing exclusions or making all tunnel addresses unavailable
+// returns the driver to Ready. In this API, a process with Split set to true is
+// excluded from the VPN rather than included in it.
+//
 // The controller serializes control operations and allows one concurrent
 // event read. After Close, operations return an error matching os.ErrClosed.
 // Native cancellation requests are drained before their buffers are released,

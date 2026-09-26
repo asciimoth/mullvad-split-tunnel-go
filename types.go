@@ -87,19 +87,24 @@ func (g GUID) String() string {
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
-// Sublayers must identify existing caller-owned WFP sublayers. Create them in
-// a non-dynamic session: the driver uses its own dynamic session, whose objects
-// cannot reference dynamic objects from a different session. Commit the caller's
-// WFP transaction before Initialize. These sublayers are not created here and
-// must remain alive until driver Reset has completed.
+// Sublayers must identify existing caller-owned WFP sublayers. Baseline holds
+// general redirect, permit, and block filters; DNS holds DNS-specific permits.
+// Create them in a non-dynamic session: the driver uses its own dynamic session,
+// whose objects cannot reference dynamic objects from a different session.
+// Commit the caller's WFP transaction before Initialize. These sublayers are not
+// created here and must remain alive until driver Reset has completed.
 type Sublayers struct {
 	Baseline GUID
 	DNS      GUID
 }
 
-// Addresses contains one address per role/family. An invalid or unspecified
-// address encodes zero (unavailable). Scoped/link-local IPv6 cannot be expressed
-// safely by this ABI and is rejected. Selecting the addresses is the caller's job.
+// Addresses contains one local address per role/family. Tunnel addresses belong
+// to the VPN/TUN interface. Internet addresses belong to the selected non-tunnel
+// interface; they are not gateways or remote endpoints. An invalid or
+// unspecified address encodes zero (unavailable). Scoped/link-local IPv6 cannot
+// be expressed safely by this ABI and is rejected. Selecting and monitoring the
+// addresses is the caller's job. The driver accepts only the availability modes
+// documented in its operation matrix when exclusions become engaged.
 type Addresses struct {
 	TunnelIPv4   netip.Addr
 	InternetIPv4 netip.Addr
@@ -133,6 +138,7 @@ type ProcessWarning struct {
 }
 
 // ProcessStatus is driver process-tree information, not socket-owner metadata.
+// Split is true when the process is excluded from the VPN tunnel.
 type ProcessStatus struct {
 	PID       uint32
 	ParentPID uint32

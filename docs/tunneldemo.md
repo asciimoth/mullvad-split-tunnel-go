@@ -5,6 +5,12 @@ adapter, adds IPv4 and IPv6 addresses and routes, creates two WFP sublayers, and
 uses the public `splittunnel` API to configure the Mullvad split-tunnel driver.
 It is not a VPN client.
 
+Use this command to learn and validate the packet paths in an isolated system.
+Do not use it as a production integration template. It has no encrypted VPN
+protocol, DNS policy, kill switch, driver-service manager, interface monitor,
+durable crash recovery, or general route ownership. For the production API and
+resource contract, see the [application integration guide](integration.md).
+
 The companion `cmd/tunnelpeer` accepts one IP packet per UDP datagram and sends
 minimal TCP or UDP echo replies. The eight-byte header contains `MSTD`, version
 1, and three zero bytes. The protocol has no encryption, authentication, peer

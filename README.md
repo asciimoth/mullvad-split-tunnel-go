@@ -3,20 +3,33 @@
 An unofficial Go library for controlling the Mullvad Windows split-tunneling
 driver.
 
-The controller targets driver **1.3.0.0** on Windows **amd64/arm64**. Portable
-compilation, static analysis, race tests, fuzz tests, and Windows cross-builds
-pass. Native Windows and live-driver tests still require a prepared Windows
-host. Native qualification is accepted for the Windows configurations listed
-below.
+The controller targets driver **1.3.0.0** on Windows **amd64/arm64**. Static
+analysis, race tests, fuzz tests, and Windows cross-builds pass. Native Windows
+and live-driver tests still require a prepared Windows host. Native
+qualification is accepted for the Windows configurations listed below.
 
 ## Repository contents
 
+- [Application integration guide](docs/integration.md)
 - [Minimal tunnel demonstration](docs/tunneldemo.md)
 - [Validation status and commands](VALIDATION.md)
 - Controller source, diagnostic command, lifecycle example, protocol fixtures,
   tests, and CI workflow.
 
-## Included
+## What the library does
+
+This package is the user-mode controller for one Windows kernel driver. It lets
+an application give the driver a list of executable paths that must bypass the
+VPN. The driver treats all other processes as included; the caller must provide
+the VPN route and firewall policy.
+
+For an excluded process, the driver redirects socket binds away from the tunnel
+interface, permits traffic on the non-tunnel interface, and blocks existing
+tunnel connections. It tracks new and departing processes, applies exclusion to
+children of excluded processes, and can reclassify running processes when the
+path list changes. IPv4 and IPv6 are supported.
+
+The package provides:
 
 - Controller operations for state, initialization, process registration,
   addresses, exclusions, queries, events, reset, and shutdown.
@@ -29,10 +42,55 @@ below.
 - C++ fixtures from pinned upstream headers, plus protocol, lifecycle, fuzz, and
   Windows helper tests.
 
-The library does not install the driver, create WFP sublayers, create a TUN,
-change routes or DNS, monitor adapters, or implement a kill switch. The
-Windows-only `cmd/tunneldemo` executable owns these resources for its isolated
-example session; these facilities are not part of the library API.
+The package does not carry VPN packets. Windows routing sends included traffic
+to a TUN interface that the application owns. The driver steers excluded traffic
+through the physical or other non-tunnel interface. The caller must install and
+start the driver, create the TUN and Windows Filtering Platform (WFP) resources,
+configure routes and DNS, monitor interface changes, and provide any kill
+switch if needed.
+
+The Windows-only `cmd/tunneldemo` command creates enough of these resources for
+an isolated example. Its WFP, Wintun, routing, and packet transport code is not
+part of the library API and is not a production VPN implementation.
+
+## API model in brief
+
+`Open` acquires the driver's single global device. The handle is exclusive, so
+one application must own the complete session. Opening the handle does not
+change driver policy. In particular, `Close` only releases local resources; it
+does not undo an initialized or engaged driver.
+
+The normal state sequence is:
+
+```text
+Started --Initialize--> Initialized --RegisterProcesses--> Ready
+                                                          ^   |
+                                  clear/no tunnel address |   | exclusions and
+                                                          |   | supported addresses
+                                                          |   v
+                                                        Engaged
+```
+
+`Ready` means that process tracking is active but traffic splitting is not.
+`Engaged` means that the exclusion set is nonempty and a supported address
+combination with at least one tunnel address is available. `Reset` returns a
+healthy controller to `Started`. A failed driver teardown can produce `Zombie`,
+which requires recovery outside the normal controller API.
+
+The API uses these terms:
+
+- **Tunnel address:** a local unicast address assigned to the VPN/TUN interface.
+- **Internet address:** a local unicast address of the current non-tunnel
+  interface. It is not a gateway, VPN relay, or public address reported by a web
+  service.
+- **Excluded or split process:** a process whose traffic bypasses the VPN.
+  Therefore, `ProcessStatus.Split == true` means that the process is excluded.
+- **WFP sublayer:** a caller-created ordering container for Windows firewall
+  filters. It is not a network layer or a TUN interface.
+
+See the [application integration guide](docs/integration.md) for the state and
+method contract, WFP resource ownership, valid address combinations, event
+handling, and recovery.
 
 ## Development environment
 
@@ -122,14 +180,15 @@ network resources listed in [VALIDATION.md](VALIDATION.md).
 
 ## Initialize a session
 
-The caller must first create persistent WFP sublayers and configure the TUN and
-underlay addresses. Keep the sublayers alive until the driver has been reset
-successfully.
+After `Open` confirms `StateStarted`, create persistent WFP sublayers, configure
+the TUN, and identify the underlay addresses. Do this before `Initialize`. Keep
+the sublayers alive until the driver has been reset successfully.
 
 The driver sequence is:
 
 1. `Open` and inspect `State`. Expect `StateStarted`; handle existing state
    through explicit recovery.
+1. Create and commit the caller-owned WFP and network resources.
 1. `Initialize(ctx, sublayers)`.
 1. `SnapshotProcesses()`, inspect warnings, then `RegisterProcesses`.
 1. `SetAddresses` with the TUN and actual underlying interface addresses.
@@ -206,18 +265,20 @@ Windows resolver behavior, localhost UDP, or multicast reception.
 
 ## Error handling
 
-All controller errors add operation context and support `errors.Is`. Check for
-`context.Canceled`, `context.DeadlineExceeded`, `os.ErrClosed`, and the package
-sentinels. Treat `ErrProtocol` as an incompatible or faulty driver response and
-stop changing policy. Treat `ErrState` as a request to inspect `State`; do not
-reset policy that another process may own.
+Controller operations preserve error causes for `errors.Is`, and commands add
+operation context. Check for `context.Canceled`, `context.DeadlineExceeded`,
+`os.ErrClosed`, and the package sentinels. Treat `ErrProtocol` as an
+incompatible or faulty driver response and stop changing policy. Treat
+`ErrState` as a request to inspect `State`; reset only through an explicit
+ownership or recovery path.
 
 Cancellation is not a transaction boundary. After a cancelled `Initialize` or
 `RegisterProcesses`, read `State`. After a cancelled address or exclusion
 change, read `Addresses` or `ExcludedDevicePaths`. After a cancelled `Reset`,
-reopen the device when safe and read `State`. Keep caller-owned WFP sublayers
-alive until reset is confirmed. Inspect every `Snapshot.Warnings` entry because
-the snapshot keeps processes whose metadata could not be read.
+read `State` with a fresh context; reopen only if the handle is no longer
+usable. Keep caller-owned WFP sublayers alive until reset is confirmed. Inspect
+every `Snapshot.Warnings` entry because the snapshot keeps processes whose
+metadata could not be read.
 
 Stop and join the event reader before `Shutdown`. If `Shutdown` returns a reset
 error, preserve the WFP objects and perform explicit recovery. Calling `Close`

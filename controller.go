@@ -186,6 +186,8 @@ func (c *Controller) RegisterProcesses(ctx context.Context, processes []Process)
 
 // SetAddresses replaces the tunnel and Internet addresses. It requires Ready
 // or Engaged. An invalid or unspecified address marks that role as unavailable.
+// The driver can reject an availability combination outside its nine modes when
+// a nonempty exclusion configuration would make splitting engaged.
 func (c *Controller) SetAddresses(ctx context.Context, addresses Addresses) error {
 	return c.run(ctx, false, "set addresses", func(ctx context.Context) error {
 		b, err := encodeAddresses(addresses)
@@ -320,11 +322,12 @@ func (c *Controller) resolveExcludedPaths(ctx context.Context, paths []string) (
 	}
 }
 
-// SetExcludedPaths resolves existing absolute executable paths before changing
-// driver policy. A resolution error leaves the exclusion set untouched. Path
-// resolution does not hold the controller command lane. A context cancellation
-// or Close abandons a blocked filesystem call; the detached resolver can remain
-// blocked until Windows completes that call.
+// SetExcludedPaths resolves existing absolute executable paths, then replaces
+// the entire exclusion set. An empty set clears configuration. A resolution
+// error leaves the exclusion set untouched. Path resolution does not hold the
+// controller command lane. A context cancellation or Close abandons a blocked
+// filesystem call; the detached resolver can remain blocked until Windows
+// completes that call.
 func (c *Controller) SetExcludedPaths(ctx context.Context, paths []string) error {
 	resolved, err := c.resolveExcludedPaths(ctx, paths)
 	if err != nil {
