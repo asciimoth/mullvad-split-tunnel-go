@@ -1,6 +1,6 @@
-// Package session shows the driver portion of a future sysnet-windows backend.
-// It assumes the caller already owns committed, non-dynamic WFP sublayers and
-// a configured TUN. See splittunnel.Sublayers for the lifetime requirements.
+// Package session shows a complete controller ownership sequence. It assumes
+// the caller already owns committed, non-dynamic WFP sublayers and a configured
+// TUN. See splittunnel.Sublayers for the lifetime requirements.
 package session
 
 import (

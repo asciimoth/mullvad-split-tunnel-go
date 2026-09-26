@@ -385,6 +385,41 @@ func TestPacketFlowPolicyTable(t *testing.T) {
 	}
 }
 
+func TestPacketFlowValidateResponse(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		expectedPath string
+		network      string
+		response     flowResponse
+		wantError    string
+	}{
+		{name: "IPv4 tunnel", expectedPath: "tunnel", network: "tcp4", response: flowResponse{LocalAddr: "198.18.0.2:1234"}},
+		{name: "IPv4 underlay", expectedPath: "underlay", network: "udp4", response: flowResponse{LocalAddr: "198.18.1.2:1234"}},
+		{name: "IPv6 tunnel", expectedPath: "tunnel", network: "tcp6", response: flowResponse{LocalAddr: "[fd00:18::2]:1234"}},
+		{name: "IPv6 underlay", expectedPath: "underlay", network: "udp6", response: flowResponse{LocalAddr: "[fd00:18:1::2]:1234"}},
+		{name: "none stopped", expectedPath: "none", network: "tcp4", response: flowResponse{Error: "stopped"}},
+		{name: "optional tunnel stopped", expectedPath: "tunnel-or-none-stopped", network: "tcp4", response: flowResponse{Error: "stopped"}},
+		{name: "optional tunnel survived", expectedPath: "tunnel-or-none-stopped", network: "tcp6", response: flowResponse{LocalAddr: "[fd00:18::2]:1234"}},
+		{name: "optional underlay stopped", expectedPath: "underlay-or-none-stopped", network: "udp4", response: flowResponse{Error: "stopped"}},
+		{name: "optional underlay survived", expectedPath: "underlay-or-none-stopped", network: "udp6", response: flowResponse{LocalAddr: "[fd00:18:1::2]:1234"}},
+		{name: "none survived", expectedPath: "none", network: "tcp4", response: flowResponse{LocalAddr: "198.18.0.2:1234"}, wantError: "unexpectedly survived"},
+		{name: "required tunnel stopped", expectedPath: "tunnel", network: "tcp4", response: flowResponse{Error: "stopped"}, wantError: "stopped"},
+		{name: "optional tunnel used underlay", expectedPath: "tunnel-or-none-stopped", network: "tcp4", response: flowResponse{LocalAddr: "198.18.1.2:1234"}, wantError: "local address"},
+		{name: "optional underlay used tunnel", expectedPath: "underlay-or-none-stopped", network: "tcp4", response: flowResponse{LocalAddr: "198.18.0.2:1234"}, wantError: "local address"},
+		{name: "unknown path", expectedPath: "elsewhere", network: "tcp4", response: flowResponse{Error: "stopped"}, wantError: "unknown expected path"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateFlowResponse(test.expectedPath, test.network, "2", test.response)
+			if test.wantError == "" && err != nil {
+				t.Fatalf("validateFlowResponse() error = %v; want nil", err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("validateFlowResponse() error = %v; want text %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func expectedFlowPath(mode addressMode, role, network string) string {
 	if role == "included" {
 		return "tunnel"
@@ -452,27 +487,40 @@ func (h *packetFlowTest) observe(phase, profile, role, network, flow, expectedPa
 	if err := h.manifest.Sync(); err != nil {
 		h.t.Fatal(err)
 	}
-	stopped := strings.HasSuffix(expectedPath, "-stopped")
-	addressPath := strings.TrimSuffix(expectedPath, "-or-none-stopped")
-	addressPath = strings.TrimSuffix(addressPath, "-stopped")
-	if expectedPath == "none" {
-		if response.Error == "" {
-			h.t.Fatalf("%s: existing flow unexpectedly survived", flow)
-		}
-		return
+	if err := validateFlowResponse(expectedPath, network, expectedSuffix, response); err != nil {
+		h.t.Fatalf("%s: %v", flow, err)
 	}
-	if stopped {
+}
+
+func validateFlowResponse(expectedPath, network, expectedSuffix string, response flowResponse) error {
+	addressPath := expectedPath
+	optionalStop := false
+	switch expectedPath {
+	case "tunnel", "underlay":
+	case "none":
 		if response.Error == "" {
-			h.t.Fatalf("%s: existing flow unexpectedly survived", flow)
+			return errors.New("existing flow unexpectedly survived")
 		}
-		return
+		return nil
+	case "tunnel-or-none-stopped":
+		addressPath = "tunnel"
+		optionalStop = true
+	case "underlay-or-none-stopped":
+		addressPath = "underlay"
+		optionalStop = true
+	default:
+		return fmt.Errorf("unknown expected path %q", expectedPath)
+	}
+	if optionalStop && response.Error != "" {
+		return nil
 	}
 	if response.Error != "" {
-		h.t.Fatalf("%s: %s", flow, response.Error)
+		return errors.New(response.Error)
 	}
 	if host := flowHost(response.LocalAddr); host != expectedFlowAddress(addressPath, network, expectedSuffix) {
-		h.t.Fatalf("%s used local address %q; want %s path address", flow, host, expectedPath)
+		return fmt.Errorf("used local address %q; want %s path address", host, expectedPath)
 	}
+	return nil
 }
 
 func (h *packetFlowTest) exchange(phase, profile, role, network, id, expectedPath, suffix string) {

@@ -66,22 +66,30 @@ func driverGUID(t *testing.T, g string) splittunnel.GUID {
 }
 
 func TestDriverLifecycle(t *testing.T) {
-	for iteration := 0; iteration < 4; iteration++ {
-		t.Run("warm-up-"+string(rune('A'+iteration)), func(t *testing.T) { runLifecycle(t) })
+	const (
+		batchSize = 10
+		batches   = 4
+	)
+	t.Logf("warm-up batch: sessions=%d", batchSize)
+	for range batchSize {
+		runLifecycle(t)
 	}
 	time.Sleep(250 * time.Millisecond)
 	runtime.GC()
-	measurements := make([]resourceCounts, 0, 4)
-	for iteration := 0; iteration < 4; iteration++ {
-		t.Run(string(rune('A'+iteration)), func(t *testing.T) { runLifecycle(t) })
+	measurements := make([]resourceCounts, 0, batches)
+	for batch := range batches {
+		for range batchSize {
+			runLifecycle(t)
+		}
 		time.Sleep(250 * time.Millisecond)
 		runtime.GC()
 		counts := processResourceCounts(t)
 		measurements = append(measurements, counts)
-		t.Logf("complete session %d: handles=%d goroutines=%d", iteration+1, counts.handles, counts.goroutines)
+		t.Logf("complete batch %d: sessions=%d handles=%d goroutines=%d",
+			batch+1, (batch+1)*batchSize, counts.handles, counts.goroutines)
 	}
 	if resourcesGrowPersistently(measurements) {
-		t.Fatalf("complete sessions show persistent resource growth: measurements=%+v", measurements)
+		t.Fatalf("complete session batches show persistent resource growth: measurements=%+v", measurements)
 	}
 }
 

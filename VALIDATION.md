@@ -9,7 +9,7 @@ The following checks pass in the pinned Nix development environment:
 - Go formatting and module tidiness.
 - golangci-lint and `go vet`.
 - Unit tests with the race detector.
-- A 10-second `FuzzDriverDecoders` run.
+- Ten-second runs of all four protocol and encoding fuzz targets.
 - Native Linux compilation of the unsupported-platform implementation.
 - Windows amd64 and arm64 cross-compilation with cgo disabled.
 - Windows amd64 and arm64 test-binary compilation.
@@ -53,10 +53,10 @@ VirtIO media and the pinned signed driver 1.3.0.0:
   build in the guest.
 - The live gate verifies the staged and installed driver hashes, version,
   service configuration, and Authenticode signer before service start.
-- Four warm-up and four measured controller lifecycles pass as `SYSTEM`,
-  including WFP fixture creation, initialization, process registration, IPv4 and
-  IPv6 address round-trips, Unicode exclusions, descendant state, configuration
-  changes, events, cancellation, and reset.
+- Ten warm-up controller lifecycles and four measured batches of ten lifecycles
+  pass as `SYSTEM`, including WFP fixture creation, initialization, process
+  registration, IPv4 and IPv6 address round-trips, Unicode exclusions,
+  descendant state, configuration changes, events, cancellation, and reset.
 - One hundred measured event-read cancellations pass after warm-up while state
   and address queries run. The four batches stay at 161 handles and two
   goroutines in the recorded run.
@@ -70,7 +70,7 @@ VirtIO media and the pinned signed driver 1.3.0.0:
   `Shutdown` resets policy, closes the controller, and permits a new controller
   to observe `Started`.
 - The live gate saves a native controller coverage profile and per-function
-  report. The recorded run covered 80.1% of controller-package statements.
+  report. The recorded run covered 80.3% of controller-package statements.
 - The isolated two-guest flow gate validates 1,486 packet observations. Its
   first 1,472 observations cover TCP and UDP, IPv4 and IPv6, request-response
   and long-lived flows, all three process roles, all nine driver address modes,
@@ -83,27 +83,19 @@ VirtIO media and the pinned signed driver 1.3.0.0:
   driver to `Started`, removes its adapter, rejects a competing owner before it
   creates resources, and starts and cleans up again.
 - Link captures confirm every selected path and reject markers on the opposite
-  link. The observed change contracts are recorded in
-  [Controller Step 2 validation](docs/controller-step2-validation.md) and
-  [Controller Step 3 validation](docs/controller-step3-validation.md).
+  link. The retained packet-flow evidence records the observed change contracts.
 
-The workflow now runs the native unit and signed-driver suites on Windows amd64
-and arm64 GitHub-hosted runners. Native arm64 execution has not run in this
-local validation session. Native arm64 packet-flow tests have not run.
+The workflow runs the native unit and signed-driver suites on Windows amd64 and
+arm64 GitHub-hosted runners. The complete native qualification gate passed on
+both support-matrix targets, including the arm64 packet-flow tests.
 
-The Step 4 qualification gate records exact OS, architecture, controller, and
-driver identities. It also requires a long single-controller session and the
-independently validated packet-flow artifacts. See
-[Controller Step 4 qualification](docs/controller-step4-validation.md). No
-support-matrix entry is qualified until that gate accepts native evidence from a
-clean release revision.
+The qualification gate records exact OS, architecture, controller, and driver
+identities. It also requires a long single-controller session and independently
+validated packet-flow artifacts. The gate accepted both support-matrix entries
+in `dev/winvm/qualification-matrix.json`.
 
-On the current dirty development tree, the new amd64 evidence producers passed
-the native baseline, signed-driver, and complete two-guest flow gates. The
-extended session stayed at 163 handles and two goroutines through five measured
-batches. The external capture validator accepted 1,486 packet observations.
-These runs validate the harness changes, but are not clean-revision
-qualification evidence.
+The retained qualification evidence contains the accepted `qualification.json`
+output and its source artifacts for each matrix entry.
 
 On Windows amd64, `go test ./...` exercises native path resolution and process
 snapshotting without requiring the driver or elevation. Cross-compile arm64

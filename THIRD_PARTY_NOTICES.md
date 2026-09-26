@@ -17,7 +17,7 @@ drivers, libraries, or sources.
   SHA-256 hash for each catalog, setup-information file, and driver binary.
 - The optional fixture generator includes headers from a separately obtained
   upstream checkout. Retain upstream notices if you redistribute those headers.
-- golang.org/x/sys v0.44.0 is an external dependency under the Go project's
+- golang.org/x/sys v0.47.0 is an external dependency under the Go project's
   BSD-style license. It is referenced through go.mod, not vendored.
 - golang.zx2c4.com/wintun provides MIT-licensed Go bindings used only by the
   tunnel example. The separately downloaded official Wintun DLL includes its own

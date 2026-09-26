@@ -18,10 +18,17 @@ const (
 )
 
 var (
+	// ErrUnsupportedPlatform means the package is not running on Windows amd64
+	// or arm64.
 	ErrUnsupportedPlatform = errors.New("requires Windows amd64 or arm64")
-	ErrInvalidArgument     = errors.New("invalid argument")
-	ErrProtocol            = errors.New("invalid driver response")
-	ErrState               = errors.New("operation is invalid in current driver state")
+	// ErrInvalidArgument means the caller supplied a value that cannot be sent
+	// safely to the driver.
+	ErrInvalidArgument = errors.New("invalid argument")
+	// ErrProtocol means the driver returned a malformed or unsupported response.
+	ErrProtocol = errors.New("invalid driver response")
+	// ErrState means the requested operation is not valid in the current driver
+	// state.
+	ErrState = errors.New("operation is invalid in current driver state")
 )
 
 // State values follow src/defs/state.h. In the pinned driver, 5 means Zombie,
@@ -37,6 +44,7 @@ const (
 	StateZombie
 )
 
+// String returns the protocol name of s.
 func (s State) String() string {
 	names := [...]string{"none", "started", "initialized", "ready", "engaged", "zombie"}
 	if uint64(s) < uint64(len(names)) {
@@ -49,6 +57,7 @@ func (s State) String() string {
 // Prefer ParseGUID to constructing these bytes by hand.
 type GUID [16]byte
 
+// ParseGUID parses the standard dashed or braced text representation of a GUID.
 func ParseGUID(s string) (GUID, error) {
 	var g GUID
 	if len(s) == 38 && s[0] == '{' && s[37] == '}' {
@@ -68,6 +77,7 @@ func ParseGUID(s string) (GUID, error) {
 	return g, nil
 }
 
+// String returns the standard lowercase dashed representation of g.
 func (g GUID) String() string {
 	b := g
 	b[0], b[1], b[2], b[3] = g[3], g[2], g[1], g[0]
@@ -114,6 +124,8 @@ type Snapshot struct {
 	Warnings  []ProcessWarning
 }
 
+// ProcessWarning describes process metadata that SnapshotProcesses could not
+// read. The corresponding process remains in the snapshot.
 type ProcessWarning struct {
 	PID       uint32
 	Operation string
@@ -128,6 +140,7 @@ type ProcessStatus struct {
 	ImagePath string
 }
 
+// EventID identifies one driver event payload.
 type EventID uint32
 
 const (
@@ -138,6 +151,7 @@ const (
 	EventErrorMessage        EventID = 0x80000003
 )
 
+// Reason is a bit field that explains a process-classification event.
 type Reason uint32
 
 const (

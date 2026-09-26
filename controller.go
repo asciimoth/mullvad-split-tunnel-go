@@ -128,6 +128,7 @@ func (c *Controller) requireState(ctx context.Context, allowed ...State) error {
 	return fmt.Errorf("%w: got %s, expected %v", ErrState, state, allowed)
 }
 
+// State returns the current state of the driver.
 func (c *Controller) State(ctx context.Context) (state State, err error) {
 	err = c.run(ctx, false, "state", func(ctx context.Context) error {
 		var e error
@@ -172,6 +173,8 @@ func (c *Controller) RegisterProcesses(ctx context.Context, processes []Process)
 	})
 }
 
+// SetAddresses replaces the tunnel and Internet addresses. It requires Ready
+// or Engaged. An invalid or unspecified address marks that role as unavailable.
 func (c *Controller) SetAddresses(ctx context.Context, addresses Addresses) error {
 	return c.run(ctx, false, "set addresses", func(ctx context.Context) error {
 		b, err := encodeAddresses(addresses)
@@ -186,6 +189,7 @@ func (c *Controller) SetAddresses(ctx context.Context, addresses Addresses) erro
 	})
 }
 
+// Addresses returns the addresses that are registered with the driver.
 func (c *Controller) Addresses(ctx context.Context) (addresses Addresses, err error) {
 	err = c.run(ctx, false, "get addresses", func(ctx context.Context) error {
 		if e := c.requireState(ctx, StateReady, StateEngaged); e != nil {
@@ -280,10 +284,12 @@ func (c *Controller) ExcludedDevicePaths(ctx context.Context) (paths []string, e
 	return
 }
 
+// ClearConfiguration removes every executable exclusion.
 func (c *Controller) ClearConfiguration(ctx context.Context) error {
 	return c.SetExcludedDevicePaths(ctx, nil)
 }
 
+// QueryProcess returns the driver's current classification for pid.
 func (c *Controller) QueryProcess(ctx context.Context, pid uint32) (process ProcessStatus, err error) {
 	err = c.run(ctx, false, "query process", func(ctx context.Context) error {
 		if pid == 0 {

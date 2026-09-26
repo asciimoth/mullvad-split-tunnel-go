@@ -6,12 +6,13 @@ driver.
 The controller targets driver **1.3.0.0** on Windows **amd64/arm64**. Portable
 compilation, static analysis, race tests, fuzz tests, and Windows cross-builds
 pass. Native Windows and live-driver tests still require a prepared Windows
-host.
+host. Native qualification is accepted for the Windows configurations listed
+below.
 
 ## Repository contents
 
-- [Controller implementation plan](docs/mullvad-controller-plan.md)
 - [Minimal tunnel demonstration](docs/tunneldemo.md)
+- [Validation status and commands](VALIDATION.md)
 - Controller source, diagnostic command, lifecycle example, protocol fixtures,
   tests, and CI workflow.
 
@@ -121,9 +122,9 @@ network resources listed in [VALIDATION.md](VALIDATION.md).
 
 ## Initialize a session
 
-The caller must first create the WFP sublayers and configure the TUN and
-underlay addresses. The sublayers must satisfy the non-dynamic lifetime
-requirement described in the [controller plan](docs/mullvad-controller-plan.md).
+The caller must first create persistent WFP sublayers and configure the TUN and
+underlay addresses. Keep the sublayers alive until the driver has been reset
+successfully.
 
 The driver sequence is:
 
@@ -147,13 +148,81 @@ reset driver policy.** `Shutdown` attempts `Reset` and then `Close`. A cancelled
 mutation may already have taken effect; inspect and reconcile state after an
 uncertain completion.
 
-## Compatibility and scope
+## API status and scope
+
+This project is pre-alpha. The exported API of the root `splittunnel` package is
+not stable and can change without notice. It includes the controller, wire-level
+value types, sentinel errors, process snapshot helper, and executable-path
+resolver. The commands, `examples/session`, `integration`, `internal`, and `dev`
+trees are demonstrations and development infrastructure. They are not part of
+the library API.
+
+The API contract targets only driver 1.3.0.0 at upstream commit `0a0eb97`.
+`Open` cannot detect or verify the installed driver version. Deployment must
+verify the signed driver package before it starts the service. Driver behavior,
+WFP policy, routing, DNS, adapter monitoring, and resource ownership remain the
+caller's responsibility.
+
+The qualification targets are:
+
+| Status   | Architecture | Windows configuration             |
+| -------- | ------------ | --------------------------------- |
+| Accepted | amd64        | Windows Server 2022, build 20348+ |
+| Accepted | arm64        | Windows 11 24H2, build 26100+     |
+
+The native qualification evidence is summarized in
+[VALIDATION.md](VALIDATION.md). A cross-build or a successful run on another
+Windows build does not qualify an entry.
+
+## Limits and known driver behavior
+
+- Each encoded or decoded IOCTL buffer has a 16 MiB local limit. A process
+  snapshot or exclusion configuration has a 65,536-record local limit.
+- `SetExcludedPaths` accepts existing absolute local drive-letter paths. The
+  resolver does not support UNC or other network executable paths.
+- Exclusions use the exact resolved NT device path. They do not use file
+  identity. A rename, replacement, hard link, or volume remount can require a
+  configuration update. A hard-link path must be excluded separately.
+- Windows normally sends resolver traffic through the `dnscache` service under
+  `svchost`. The driver cannot attribute that traffic to the requesting process,
+  so an excluded application's ordinary DNS traffic normally remains in the
+  tunnel. An application-specific DoH or DoT configuration can avoid the system
+  resolver.
+- An excluded UDP client that does not explicitly bind to `127.0.0.1` can fail
+  to communicate with localhost. There is no general workaround.
+- Multicast reception can fail without an API error because the redirected
+  socket bind and the `inaddr_any` group membership do not match. There is no
+  general workaround.
+
+These last three items are limitations of the pinned upstream driver. The
+isolated port-53 tests qualify WFP filter arbitration only; they do not qualify
+Windows resolver behavior, localhost UDP, or multicast reception.
+
+## Error handling
+
+All controller errors add operation context and support `errors.Is`. Check for
+`context.Canceled`, `context.DeadlineExceeded`, `os.ErrClosed`, and the package
+sentinels. Treat `ErrProtocol` as an incompatible or faulty driver response and
+stop changing policy. Treat `ErrState` as a request to inspect `State`; do not
+reset policy that another process may own.
+
+Cancellation is not a transaction boundary. After a cancelled `Initialize` or
+`RegisterProcesses`, read `State`. After a cancelled address or exclusion
+change, read `Addresses` or `ExcludedDevicePaths`. After a cancelled `Reset`,
+reopen the device when safe and read `State`. Keep caller-owned WFP sublayers
+alive until reset is confirmed. Inspect every `Snapshot.Warnings` entry because
+the snapshot keeps processes whose metadata could not be read.
+
+Stop and join the event reader before `Shutdown`. If `Shutdown` returns a reset
+error, preserve the WFP objects and perform explicit recovery. Calling `Close`
+alone only releases local resources and can leave active driver policy.
+
+## Driver scope
 
 Executable exclusions also apply to descendants according to the driver. An
-exclusion matches an exact NT path. A hard-link name is a separate path and must
-be configured separately. See the
-[Step 1 validation notes](docs/controller-step1-validation.md) for the tested
-normal, extended-prefix, and hard-link launch behavior. There is no arbitrary
+exclusion matches an exact NT path. A normal drive-letter launch and an
+extended-prefix launch of the same name resolve to the same NT path. A hard-link
+name is a separate path and must be configured separately. There is no arbitrary
 PID/include-only routing API, packet capture API, or socket-owner query API
 here. `QueryProcess` returns the driver's process classification.
 

@@ -14,7 +14,7 @@ import (
 
 // ResolveDevicePath resolves an existing executable using a file handle, so
 // junctions and volume mappings are resolved by Windows instead of guessed by
-// string replacement. This starter accepts absolute local drive-letter paths
+// string replacement. This function accepts absolute local drive-letter paths
 // (including the extended prefix), rejects directories, and does not support
 // UNC/network executable paths. The result is an exact path, not a file identity:
 // future renames, hard links, replacements, or remounts need caller monitoring.

@@ -3,7 +3,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
-check: tidy typos fmt lint vet build build-windows winvm-check test-total
+check: tidy typos fmt lint vet build build-windows vulncheck winvm-check test-total
 
 test-total: test fuzz winvm-tests
 
