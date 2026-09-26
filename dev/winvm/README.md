@@ -85,6 +85,13 @@ artifacts include the coverage profile and per-function report. `run.json`
 records the SHA-256 of `worktree.tar`, so the retained source can be matched to
 the test evidence.
 
+Native runs also write suite evidence with the exact Windows build,
+architecture, controller revision, Go version, required tests, and driver
+identity. Use the Step 4
+[qualification procedure](../../docs/controller-step4-validation.md) to combine
+the native-unit, live-driver, packet-flow, and independent capture results. The
+qualifier rejects dirty or mismatched revisions.
+
 The diagnostic shell starts with the retained disk overlay and OVMF variable
 store. It does not replace either file with base-image state.
 

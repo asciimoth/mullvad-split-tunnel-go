@@ -3,13 +3,24 @@ param(
     [string]$ArtifactDir = (Join-Path $PWD '.artifacts-windows'),
     [string]$ImageManifest = $env:WINVM_IMAGE_MANIFEST,
     [string]$ExpectedGoVersion = $env:GO_EXPECTED_VERSION,
+    [string]$ControllerRevision = $env:GITHUB_SHA,
+    [ValidateSet('clean', 'dirty', 'unknown')][string]$ControllerTreeState = 'unknown',
     [switch]$RequireStandardUser
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $env:CGO_ENABLED = '0'; $env:GOTOOLCHAIN = 'local'
+$sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+if (-not $ControllerRevision) {
+    $ControllerRevision = (& git -C $sourceRoot rev-parse HEAD 2>$null | Out-String).Trim()
+}
+if (-not $ControllerRevision) { $ControllerRevision = 'unknown' }
+if ($ControllerTreeState -eq 'unknown' -and (Test-Path (Join-Path $sourceRoot '.git'))) {
+    $ControllerTreeState = if (& git -C $sourceRoot status --porcelain) { 'dirty' } else { 'clean' }
+}
 New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 $ArtifactDir = (Resolve-Path $ArtifactDir).Path
+$startedAt = (Get-Date).ToUniversalTime().ToString('o')
 Start-Transcript -Path (Join-Path $ArtifactDir 'powershell.log') -Force | Out-Null
 . (Join-Path $PSScriptRoot 'test-output.ps1')
 function Invoke-Logged([string]$Name, [string]$Command, [string[]]$Arguments) {
@@ -68,4 +79,17 @@ try {
     }
     $parsed | Where-Object Action -eq output | ForEach-Object Output | Set-Content (Join-Path $ArtifactDir 'tests.log')
     Invoke-Logged 'go-build' 'go' @('build', './...')
+    $windows = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $productType = if ($windows.InstallationType -like 'Server*') { 3 } else { 1 }
+    [ordered]@{
+        schemaVersion=1; suite='native-unit'; outcome='passed'; startedAt=$startedAt
+        finishedAt=(Get-Date).ToUniversalTime().ToString('o')
+        controllerRevision=$ControllerRevision; controllerTreeState=$ControllerTreeState
+        architecture=$nativeArchitecture
+        os=[ordered]@{
+            caption=$windows.ProductName; version=[Environment]::OSVersion.Version.ToString()
+            build=$windows.CurrentBuildNumber; productType=$productType
+        }
+        goVersion=(& go version | Out-String).Trim(); requiredTests=$required
+    } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $ArtifactDir 'native-unit-evidence.json')
 } finally { Stop-Transcript | Out-Null }

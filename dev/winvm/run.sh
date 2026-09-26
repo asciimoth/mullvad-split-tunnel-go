@@ -192,11 +192,13 @@ fi
 stage='test'; test_timeout=$(jq -r .machine.testTimeoutSeconds "$config_file"); set +e
 printf 'Running the Windows %s gate with a %d-minute timeout...\n' "$mode" "$((test_timeout/60))"
 if [[ $mode == baseline ]]; then
-    command="Set-Location '$remote/source'; & './dev/winvm/test.ps1' -ArtifactDir '$remote/artifacts' -ImageManifest 'C:/winvm/manifest.json' -RequireStandardUser"
+    tree_state=clean; [[ $dirty == false ]] || tree_state=dirty
+    command="Set-Location '$remote/source'; & './dev/winvm/test.ps1' -ArtifactDir '$remote/artifacts' -ImageManifest 'C:/winvm/manifest.json' -ControllerRevision '$revision' -ControllerTreeState '$tree_state' -RequireStandardUser"
     timeout --foreground --kill-after=30 "${test_timeout}s" ssh "${ssh_opts[@]}" "$target" "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"$command\"" 2>&1 | tee "$run_dir/windows-console.log"; test_status=${PIPESTATUS[0]}
 else
     flow_argument=''; [[ $mode == flow ]] && flow_argument=' -Flow'
-    command="& '$remote/source/dev/winvm/e2e.ps1' -SourceDir '$remote/source' -ArtifactDir '$remote/artifacts'$flow_argument"
+    tree_state=clean; [[ $dirty == false ]] || tree_state=dirty
+    command="& '$remote/source/dev/winvm/e2e.ps1' -SourceDir '$remote/source' -ArtifactDir '$remote/artifacts' -ControllerRevision '$revision' -ControllerTreeState '$tree_state'$flow_argument"
     timeout --foreground --kill-after=30 "${test_timeout}s" "$script_dir/tools/qga.py" --socket "$qga" --timeout "$test_timeout" exec powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$command" 2>&1 | tee "$run_dir/windows-console.log"; test_status=${PIPESTATUS[0]}
 fi
 set -e; ((test_status==0)) || { ((test_status==124)) && stage=test-timeout; exit "$test_status"; }

@@ -180,6 +180,12 @@ not a production VPN client.
 
 ## Step 4: Qualify the library on supported Windows configurations
 
+The qualification implementation is complete. The proposed matrix, extended
+session test, evidence schema, and acceptance command are described in
+[Controller Step 4 qualification](controller-step4-validation.md). Native
+qualification runs for the release revision are still required before either
+matrix entry can be advertised as supported.
+
 Run the controller lifecycle and packet-flow suites on each supported
 architecture and Windows version.
 

@@ -65,6 +65,9 @@ test-windows-e2e:
 test-windows-flow:
     dev/winvm/run.sh flow
 
+qualify-windows entry evidence:
+    python3 dev/winvm/tools/qualify.py --matrix dev/winvm/qualification-matrix.json --entry "{{entry}}" --native-unit "{{evidence}}/native-unit-evidence.json" --live-driver "{{evidence}}/live-driver-evidence.json" --packet-flow "{{evidence}}/packet-flow-suite-evidence.json" --packet-evidence "{{evidence}}/packet-flow-evidence.json" --output "{{evidence}}/qualification.json"
+
 winvm-shell run:
     dev/winvm/run.sh --shell "{{run}}"
 

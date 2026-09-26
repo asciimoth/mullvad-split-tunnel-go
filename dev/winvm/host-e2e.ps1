@@ -21,6 +21,9 @@ $architecture = switch ($env:PROCESSOR_ARCHITECTURE) {
     default { throw "Unsupported native architecture: $env:PROCESSOR_ARCHITECTURE" }
 }
 $SourceDir = (Resolve-Path $SourceDir).Path
+$controllerRevision = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { (& git -C $SourceDir rev-parse HEAD | Out-String).Trim() }
+if (-not $controllerRevision) { throw 'Cannot identify the controller revision' }
+$controllerTreeState = if (& git -C $SourceDir status --porcelain) { 'dirty' } else { 'clean' }
 New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 $ArtifactDir = (Resolve-Path $ArtifactDir).Path
 $temporaryRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
@@ -95,6 +98,8 @@ try {
         '-ImageManifest', ('"' + $manifestPath + '"'),
         '-GoExecutable', ('"' + $goExecutable + '"'),
         '-GoModCache', ('"' + $goModCache + '"'),
+        '-ControllerRevision', ('"' + $controllerRevision + '"'),
+        '-ControllerTreeState', $controllerTreeState,
         '-ResultFile', ('"' + $resultFile + '"')
     ) -join ' '
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments

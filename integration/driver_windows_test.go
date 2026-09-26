@@ -607,6 +607,97 @@ func TestEventCancellationStress(t *testing.T) {
 	}
 }
 
+func TestExtendedControllerSession(t *testing.T) {
+	s := newLiveSession(t)
+	executable := mustExecutable(t)
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	excluded := t.TempDir() + `\not-running.exe`
+	if err := os.WriteFile(excluded, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	addresses := []splittunnel.Addresses{
+		{
+			TunnelIPv4:   netip.MustParseAddr("198.18.0.2"),
+			InternetIPv4: netip.MustParseAddr("198.18.1.2"),
+			TunnelIPv6:   netip.MustParseAddr("fd00:18:0::2"),
+			InternetIPv6: netip.MustParseAddr("fd00:18:1::2"),
+		},
+		{
+			TunnelIPv4:   netip.MustParseAddr("198.18.0.3"),
+			InternetIPv4: netip.MustParseAddr("198.18.1.3"),
+			TunnelIPv6:   netip.MustParseAddr("fd00:18:0::3"),
+			InternetIPv6: netip.MustParseAddr("fd00:18:1::3"),
+		},
+	}
+
+	const (
+		warmup   = 10
+		batches  = 5
+		perBatch = 20
+	)
+	runChange := func(iteration int) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		wantAddresses := addresses[iteration%len(addresses)]
+		if err := s.c.SetAddresses(ctx, wantAddresses); err != nil {
+			t.Fatalf("set addresses at iteration %d: %v", iteration, err)
+		}
+		wantPaths := []string{excluded}
+		if iteration%2 == 0 {
+			wantPaths = nil
+		}
+		if err := s.c.SetExcludedPaths(ctx, wantPaths); err != nil {
+			t.Fatalf("set exclusions at iteration %d: %v", iteration, err)
+		}
+		gotAddresses, err := s.c.Addresses(ctx)
+		if err != nil || gotAddresses != wantAddresses {
+			t.Fatalf("addresses at iteration %d = %+v, %v; want %+v", iteration, gotAddresses, err, wantAddresses)
+		}
+		gotPaths, err := s.c.ExcludedDevicePaths(ctx)
+		if err != nil || len(gotPaths) != len(wantPaths) {
+			t.Fatalf("exclusions at iteration %d = %v, %v; want %d path(s)", iteration, gotPaths, err, len(wantPaths))
+		}
+		cancelBlockedEvent(t, s.c, false)
+	}
+
+	for iteration := range warmup {
+		runChange(iteration)
+	}
+	runtime.GC()
+	baseline := processResourceCounts(t)
+	t.Logf("extended session warm-up: handles=%d goroutines=%d", baseline.handles, baseline.goroutines)
+	measurements := make([]resourceCounts, 0, batches)
+	for batch := range batches {
+		for iteration := range perBatch {
+			runChange(warmup + batch*perBatch + iteration)
+		}
+		runtime.GC()
+		counts := processResourceCounts(t)
+		measurements = append(measurements, counts)
+		t.Logf("extended session batch %d/%d: changes=%d handles=%d goroutines=%d",
+			batch+1, batches, (batch+1)*perBatch, counts.handles, counts.goroutines)
+	}
+	if resourcesGrowPersistently(append([]resourceCounts{baseline}, measurements...)) {
+		t.Fatalf("extended session shows persistent resource growth: baseline=%+v batches=%+v", baseline, measurements)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.c.Reset(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.reset = true
+	state, err := s.c.State(ctx)
+	if err != nil || state != splittunnel.StateStarted {
+		t.Fatalf("state after extended session reset = %v, %v; want started", state, err)
+	}
+}
+
 func TestEventCancellationWhileControllerCloses(t *testing.T) {
 	s := newLiveSession(t)
 	done := make(chan error, 1)

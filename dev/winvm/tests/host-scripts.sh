@@ -9,8 +9,10 @@ tmp=$(mktemp -d); trap 'find "$tmp" -depth -delete' EXIT
 python3 -m py_compile "$script_dir/tools/qga.py"
 python3 -m py_compile "$script_dir/tools/flow-pcap.py"
 python3 -m py_compile "$script_dir/tools/tunneldemo-input.py"
+python3 -m py_compile "$script_dir/tools/qualify.py"
 python3 "$script_dir/tests/test_flow_pcap.py"
 python3 "$script_dir/tests/test_tunneldemo_input.py"
+python3 "$script_dir/tests/test_qualify.py"
 shellcheck "$script_dir"/*.sh "$script_dir/tests"/*.sh
 
 # Test commands retain JSON events while formatting their console output.
@@ -23,6 +25,7 @@ grep -Fq "if (-not \$Flow)" "$script_dir/e2e.ps1"
 grep -Fq "'e2e-coverage.txt'" "$script_dir/e2e.ps1"
 grep -Fq 'Expected two IPv4/IPv6 listeners on ports 53 and 47823' "$script_dir/run.sh"
 grep -Fq "'TestPacketFlowTunnelDemo'" "$script_dir/e2e.ps1"
+grep -Fq "'TestExtendedControllerSession'" "$script_dir/e2e.ps1"
 grep -Fq 'TUNNELDEMO_EXE' "$script_dir/e2e.ps1"
 grep -Fq 'tunneldemo-input.py' "$script_dir/run.sh"
 grep -Fq 'tunnelDemoLockHash' "$script_dir/run.sh"

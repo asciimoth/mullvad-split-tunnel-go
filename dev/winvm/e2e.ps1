@@ -4,6 +4,8 @@ param(
     [string]$ArtifactDir,
     [string]$ImageManifest = 'C:\winvm\manifest.json',
     [string]$GoExecutable = 'go',
+    [string]$ControllerRevision = $env:GITHUB_SHA,
+    [ValidateSet('clean', 'dirty', 'unknown')][string]$ControllerTreeState = 'unknown',
     [switch]$Flow
 )
 $ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest
@@ -12,6 +14,7 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsSystem) { throw 'The live-driver gate must run as SYSTEM' }
 if (-not [Environment]::Is64BitProcess) { throw 'The live-driver gate needs a 64-bit process' }
 New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+$startedAt = (Get-Date).ToUniversalTime().ToString('o')
 . (Join-Path $SourceDir 'dev\winvm\driver.ps1')
 . (Join-Path $SourceDir 'dev\winvm\test-output.ps1')
 $manifest = Get-Content $ImageManifest -Raw | ConvertFrom-Json
@@ -20,6 +23,13 @@ $nativeArchitecture = switch ($env:PROCESSOR_ARCHITECTURE) { 'AMD64' { 'amd64' }
 if ($manifest.architecture.ToString().ToLowerInvariant() -ne $nativeArchitecture) { throw 'Driver package and native architecture do not match' }
 $goVersion = (& $GoExecutable version | Out-String).Trim()
 if ($goVersion -notmatch " windows/$nativeArchitecture$") { throw "Go process does not target native $nativeArchitecture" }
+if (-not $ControllerRevision) {
+    $ControllerRevision = (& git -C $SourceDir rev-parse HEAD 2>$null | Out-String).Trim()
+}
+if (-not $ControllerRevision) { $ControllerRevision = 'unknown' }
+if ($ControllerTreeState -eq 'unknown' -and (Test-Path (Join-Path $SourceDir '.git'))) {
+    $ControllerTreeState = if (& git -C $SourceDir status --porcelain) { 'dirty' } else { 'clean' }
+}
 $before = Get-DriverEvidence $ImageManifest; $before | ConvertTo-Json | Set-Content (Join-Path $ArtifactDir 'driver-before.json')
 $service = $manifest.driverService; $started = $false
 try {
@@ -61,6 +71,7 @@ try {
         $required = @(
             'TestDriverLifecycle',
             'TestEventCancellationStress',
+            'TestExtendedControllerSession',
             'TestEventCancellationWhileControllerCloses',
             'TestHardLinkAndAlternateLaunchPaths',
             'TestSnapshotRegistrationReplaysProcessChanges',
@@ -88,3 +99,24 @@ try {
     $after | ConvertTo-Json | Set-Content (Join-Path $ArtifactDir 'driver-after.json')
     if ($after.state -ne 'Stopped') { throw "Driver service final state is $($after.state)" }
 }
+$windows = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$productType = if ($windows.InstallationType -like 'Server*') { 3 } else { 1 }
+$suite = if ($Flow) { 'packet-flow' } else { 'live-driver' }
+$evidenceName = if ($Flow) { 'packet-flow-suite-evidence.json' } else { 'live-driver-evidence.json' }
+[ordered]@{
+    schemaVersion=1; suite=$suite; outcome='passed'; startedAt=$startedAt
+    finishedAt=(Get-Date).ToUniversalTime().ToString('o')
+    controllerRevision=$ControllerRevision; controllerTreeState=$ControllerTreeState
+    architecture=$nativeArchitecture
+    os=[ordered]@{
+        caption=$windows.ProductName; version=[Environment]::OSVersion.Version.ToString()
+        build=$windows.CurrentBuildNumber; productType=$productType
+    }
+    goVersion=$goVersion
+    driver=[ordered]@{
+        version=$manifest.driverVersion; upstreamCommit=$manifest.upstreamCommit
+        files=$manifest.driverFiles; packageSigner=$manifest.driverSigner
+        installedSigner=$after.signer; finalState=$after.state
+    }
+    requiredTests=$required
+} | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $ArtifactDir $evidenceName)

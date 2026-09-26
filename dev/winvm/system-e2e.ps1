@@ -5,6 +5,8 @@ param(
     [Parameter(Mandatory)][string]$ImageManifest,
     [Parameter(Mandatory)][string]$GoExecutable,
     [Parameter(Mandatory)][string]$GoModCache,
+    [Parameter(Mandatory)][string]$ControllerRevision,
+    [Parameter(Mandatory)][string]$ControllerTreeState,
     [Parameter(Mandatory)][string]$ResultFile
 )
 $ErrorActionPreference = 'Stop'
@@ -13,7 +15,8 @@ try {
     $env:GOMODCACHE = $GoModCache
     & (Join-Path $SourceDir 'dev\winvm\e2e.ps1') -SourceDir $SourceDir `
         -ArtifactDir $ArtifactDir -ImageManifest $ImageManifest `
-        -GoExecutable $GoExecutable
+        -GoExecutable $GoExecutable -ControllerRevision $ControllerRevision `
+        -ControllerTreeState $ControllerTreeState
     [IO.File]::WriteAllText($ResultFile, '0')
 } catch {
     $_ | Out-String | Set-Content (Join-Path $ArtifactDir 'system-e2e-error.log')
