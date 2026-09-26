@@ -3,6 +3,17 @@
 An unofficial Go library for controlling the Mullvad Windows split-tunneling
 driver.
 
+> [!WARNING]
+> This library is in a pre-release state. It has not been
+> independently audited for security. Do not rely on it for production use
+> without your own review and testing.
+
+<!-- Separate the GitHub alerts into distinct block quotes. -->
+
+> [!NOTE]
+> This independent project is not affiliated with, endorsed by, or
+> sponsored by Mullvad VPN AB. Mullvad is a trademark of its respective owner.
+
 The controller targets driver **1.3.0.0** on Windows **amd64/arm64**. Static
 analysis, race tests, fuzz tests, and Windows cross-builds pass. Native Windows
 and live-driver tests still require a prepared Windows host. Native
@@ -46,8 +57,8 @@ The package does not carry VPN packets. Windows routing sends included traffic
 to a TUN interface that the application owns. The driver steers excluded traffic
 through the physical or other non-tunnel interface. The caller must install and
 start the driver, create the TUN and Windows Filtering Platform (WFP) resources,
-configure routes and DNS, monitor interface changes, and provide any kill
-switch if needed.
+configure routes and DNS, monitor interface changes, and provide any kill switch
+if needed.
 
 The Windows-only `cmd/tunneldemo` command creates enough of these resources for
 an isolated example. Its WFP, Wintun, routing, and packet transport code is not
