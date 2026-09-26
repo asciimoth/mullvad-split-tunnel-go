@@ -479,7 +479,10 @@ func (h *packetFlowTest) exchange(phase, profile, role, network, id, expectedPat
 	h.t.Helper()
 	token := h.token()
 	h.currentPaths[id] = token
-	stopDeadline := time.Now().Add(5 * time.Second)
+	// WFP invalidation and TCP teardown can lag the process-policy event on a
+	// busy VM. Keep testing for convergence instead of failing on scheduling
+	// delay. The packet evidence still rejects traffic on the opposite path.
+	stopDeadline := time.Now().Add(15 * time.Second)
 	for {
 		response := h.processes[role].request(h.t, flowRequest{
 			Operation: "exchange", ID: id, Token: token,

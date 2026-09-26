@@ -33,6 +33,9 @@ test:
 
 fuzz:
     go test -run '^$' -fuzz '^FuzzDriverDecoders$' -fuzztime 10s .
+    go test -run '^$' -fuzz '^FuzzConfigurationRoundTrip$' -fuzztime 10s .
+    go test -run '^$' -fuzz '^FuzzProcessEncoding$' -fuzztime 10s .
+    go test -run '^$' -fuzz '^FuzzDemoTunnelProtocol$' -fuzztime 10s ./internal/demotunnel
 
 vulncheck:
     govulncheck ./...

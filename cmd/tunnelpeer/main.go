@@ -27,6 +27,10 @@ func serve(address string) error {
 	}
 	defer func() { _ = connection.Close() }()
 	fmt.Fprintf(os.Stderr, "tunnelpeer listening on %s\n", connection.LocalAddr())
+	return servePacket(connection)
+}
+
+func servePacket(connection net.PacketConn) error {
 	buffer := make([]byte, 65535)
 	for {
 		length, peer, err := connection.ReadFrom(buffer)

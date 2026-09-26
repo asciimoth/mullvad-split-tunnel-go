@@ -63,6 +63,11 @@ readiness uses an atomic generation token and must stay stable before a test can
 start. These rules prevent an early Guest Agent or SSH response from racing the
 final provisioning reboot.
 
+The live-driver gate writes `e2e-cover.out` and `e2e-coverage.txt` to its guest
+artifact archive. These files report native controller-package coverage. The
+flow gate does not enable Go coverage because it re-executes test binaries as
+packet-flow helpers.
+
 ## Artifacts and recovery
 
 Runs write `.artifacts/winvm/run-ID/`. Successful runs remove their overlay and
@@ -75,9 +80,10 @@ just winvm-shell .artifacts/winvm/run-ID
 The diagnostic shell verifies the recorded SSH host key. `just winvm-clean`
 removes only validated run directories and keeps the cached base image. Inspect
 `run.json`, `failure-stage.txt`, `qemu.log`, `serial.log`, `guest-agent.log`,
-`worktree.tar`, and the guest test artifacts after a failure. `run.json` records
-the SHA-256 of `worktree.tar`, so the retained source can be matched to the test
-evidence.
+`worktree.tar`, and the guest test artifacts after a failure. The live-driver
+artifacts include the coverage profile and per-function report. `run.json`
+records the SHA-256 of `worktree.tar`, so the retained source can be matched to
+the test evidence.
 
 The diagnostic shell starts with the retained disk overlay and OVMF variable
 store. It does not replace either file with base-image state.

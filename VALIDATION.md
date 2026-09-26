@@ -1,6 +1,6 @@
 # Validation status and commands
 
-Updated 25 September 2026.
+Updated 26 September 2026.
 
 ## Verified on Linux
 
@@ -66,16 +66,22 @@ VirtIO media and the pinned signed driver 1.3.0.0:
   launch uses its separate hard-link path and needs a separate exclusion.
 - Recovery passes after setup exits at the WFP, open, initialize, register, and
   configure phases. The driver service is stopped after the gate.
-- The isolated two-guest flow gate validates 1,484 packet observations. Its
+- Invalid calls in the `Initialized` and `Ready` states preserve driver state.
+  `Shutdown` resets policy, closes the controller, and permits a new controller
+  to observe `Started`.
+- The live gate saves a native controller coverage profile and per-function
+  report. The recorded run covered 80.1% of controller-package statements.
+- The isolated two-guest flow gate validates 1,486 packet observations. Its
   first 1,472 observations cover TCP and UDP, IPv4 and IPv6, request-response
   and long-lived flows, all three process roles, all nine driver address modes,
   restrictive filters in the baseline and DNS sublayers, active configuration
   and address changes, and a complete reset and reinitialization cycle.
-- The other 12 observations run `cmd/tunneldemo` with a real Wintun adapter and
+- The other 14 observations run `cmd/tunneldemo` with a real Wintun adapter and
   controlled peer. Included traffic uses the encapsulated path. An exact
-  exclusion and its descendant use the direct underlay. The command returns the
-  driver to `Started`, removes its adapter, and rejects a competing owner before
-  it creates resources.
+  exclusion and its descendant use the direct underlay. Two included UDP flows
+  use 1,100-byte payloads. The command consumes a process event, returns the
+  driver to `Started`, removes its adapter, rejects a competing owner before it
+  creates resources, and starts and cleans up again.
 - Link captures confirm every selected path and reject markers on the opposite
   link. The observed change contracts are recorded in
   [Controller Step 2 validation](docs/controller-step2-validation.md) and

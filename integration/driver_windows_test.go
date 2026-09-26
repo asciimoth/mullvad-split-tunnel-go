@@ -131,6 +131,106 @@ func TestInjectedSetupFailureRecovery(t *testing.T) {
 	}
 }
 
+func TestPathResolutionFailurePreservesConfiguration(t *testing.T) {
+	s := newLiveSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	executable := mustExecutable(t)
+	if err := s.c.SetExcludedPaths(ctx, []string{executable}); err != nil {
+		t.Fatal(err)
+	}
+	want, err := s.c.ExcludedDevicePaths(ctx)
+	if err != nil || len(want) != 1 {
+		t.Fatalf("initial exclusions = %v, %v", want, err)
+	}
+	missing := t.TempDir() + `\missing.exe`
+	if err := s.c.SetExcludedPaths(ctx, []string{executable, missing}); err == nil {
+		t.Fatal("missing executable path was accepted")
+	}
+	got, err := s.c.ExcludedDevicePaths(ctx)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("exclusions after resolution failure = %v, %v; want %v", got, err, want)
+	}
+}
+
+func TestInvalidStateTransitionsPreserveDriverState(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s := newInitializedSession(t)
+
+	wantStateError := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, splittunnel.ErrState) {
+			t.Fatalf("%s error = %v; want ErrState", name, err)
+		}
+	}
+	wantState := func(want splittunnel.State) {
+		t.Helper()
+		got, err := s.c.State(ctx)
+		if err != nil || got != want {
+			t.Fatalf("state = %v, %v; want %v", got, err, want)
+		}
+	}
+
+	// Initialize has completed, but process registration has not. Operations
+	// that need Ready or Engaged must fail without changing state.
+	wantState(splittunnel.StateInitialized)
+	wantStateError("addresses before registration", s.c.SetAddresses(ctx, splittunnel.Addresses{}))
+	wantStateError("configuration before registration", s.c.ClearConfiguration(ctx))
+	if _, err := s.c.ExcludedDevicePaths(ctx); !errors.Is(err, splittunnel.ErrState) {
+		t.Fatalf("exclusions before registration error = %v; want ErrState", err)
+	}
+	wantState(splittunnel.StateInitialized)
+
+	snapshot, err := splittunnel.SnapshotProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.c.RegisterProcesses(ctx, snapshot.Processes); err != nil {
+		t.Fatal(err)
+	}
+	wantState(splittunnel.StateReady)
+
+	// Each setup operation is one-shot. Rejected repetitions must leave the
+	// valid session usable so cleanup can reset it normally.
+	wantStateError("second initialize", s.c.Initialize(ctx, splittunnel.Sublayers{
+		Baseline: driverGUID(t, s.fixture.keys[0].String()),
+		DNS:      driverGUID(t, s.fixture.keys[1].String()),
+	}))
+	wantStateError("second registration", s.c.RegisterProcesses(ctx, snapshot.Processes))
+	if _, err := s.c.QueryProcess(ctx, 0); !errors.Is(err, splittunnel.ErrInvalidArgument) {
+		t.Fatalf("zero PID query error = %v; want ErrInvalidArgument", err)
+	}
+	wantState(splittunnel.StateReady)
+}
+
+func TestShutdownResetsAndClosesController(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s := newLiveSession(t)
+
+	if err := s.c.SetExcludedPaths(ctx, []string{mustExecutable(t)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.c.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.reset = true
+	if _, err := s.c.State(ctx); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("state after shutdown error = %v; want os.ErrClosed", err)
+	}
+
+	reopened, err := splittunnel.Open()
+	if err != nil {
+		t.Fatalf("open after shutdown: %v", err)
+	}
+	defer reopened.Close()
+	state, err := reopened.State(ctx)
+	if err != nil || state != splittunnel.StateStarted {
+		t.Fatalf("state after shutdown = %v, %v; want started", state, err)
+	}
+}
+
 func injectSetupFailure(t *testing.T, phase string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -53,6 +53,10 @@ func serveTCP(address string) error {
 		return fmt.Errorf("listen TCP on %s: %w", address, err)
 	}
 	defer func() { _ = listener.Close() }()
+	return serveTCPListener(listener, address)
+}
+
+func serveTCPListener(listener net.Listener, address string) error {
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
@@ -71,6 +75,10 @@ func serveUDP(address string) error {
 		return fmt.Errorf("listen UDP on %s: %w", address, err)
 	}
 	defer func() { _ = connection.Close() }()
+	return serveUDPPacket(connection, address)
+}
+
+func serveUDPPacket(connection net.PacketConn, address string) error {
 	buffer := make([]byte, 2048)
 	for {
 		length, peer, err := connection.ReadFrom(buffer)

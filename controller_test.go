@@ -120,15 +120,82 @@ func TestConfigurationUsesSizeProbe(t *testing.T) {
 	}
 }
 
-func TestMalformedSizeProbeDoesNotAllocateOrFetch(t *testing.T) {
+func TestControllerOperationsUseExpectedWireMessages(t *testing.T) {
+	addresses := Addresses{
+		TunnelIPv4:   netip.MustParseAddr("10.64.0.2"),
+		InternetIPv4: netip.MustParseAddr("192.0.2.2"),
+		TunnelIPv6:   netip.MustParseAddr("fd00::2"),
+		InternetIPv6: netip.MustParseAddr("2001:db8::2"),
+	}
+	encodedAddresses, err := encodeAddresses(addresses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processes := []Process{{PID: 1, ImagePath: `\Device\Volume\app.exe`}}
+	encodedProcesses, err := encodeProcesses(processes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{`\Device\Volume\app.exe`}
+	encodedPaths, err := encodeConfiguration(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventReply := unhex(t, loadFixture(t).Events.Start)
 	d := &scriptedTransport{steps: []step{
+		{code: ioctlGetState, outputSize: 8, reply: stateReply(StateInitialized)},
+		{code: ioctlRegisterProcesses, input: encodedProcesses},
 		{code: ioctlGetState, outputSize: 8, reply: stateReply(StateReady)},
-		{code: ioctlGetConfiguration, outputSize: 8, reply: bytes.Repeat([]byte{255}, 8)},
+		{code: ioctlRegisterAddresses, input: encodedAddresses},
+		{code: ioctlGetState, outputSize: 8, reply: stateReply(StateEngaged)},
+		{code: ioctlGetAddresses, outputSize: addressesSize, reply: encodedAddresses},
+		{code: ioctlGetState, outputSize: 8, reply: stateReply(StateReady)},
+		{code: ioctlSetConfiguration, input: encodedPaths},
+		{code: ioctlDequeueEvent, outputSize: eventBufferSize, reply: eventReply},
+		{code: ioctlReset},
 	}}
 	c := newController(d)
 	defer closeController(t, c)
-	if _, err := c.ExcludedDevicePaths(context.Background()); !errors.Is(err, ErrProtocol) {
-		t.Fatalf("accepted unbounded driver allocation: %v", err)
+	if err := c.RegisterProcesses(context.Background(), processes); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetAddresses(context.Background(), addresses); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.Addresses(context.Background()); err != nil || got != addresses {
+		t.Fatalf("addresses = %#v, %v; want %#v", got, err, addresses)
+	}
+	if err := c.SetExcludedDevicePaths(context.Background(), paths); err != nil {
+		t.Fatal(err)
+	}
+	if event, err := c.ReadEvent(context.Background()); err != nil || event.ID != EventStartSplitting {
+		t.Fatalf("event = %#v, %v", event, err)
+	}
+	if err := c.Reset(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.steps) != 0 {
+		t.Fatalf("%d wire operations were not issued", len(d.steps))
+	}
+}
+
+func TestMalformedSizeProbeDoesNotAllocateOrFetch(t *testing.T) {
+	for name, reply := range map[string][]byte{
+		"short":     make([]byte, 7),
+		"too small": stateReply(configHeaderSize - 1),
+		"too large": bytes.Repeat([]byte{255}, 8),
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := &scriptedTransport{steps: []step{
+				{code: ioctlGetState, outputSize: 8, reply: stateReply(StateReady)},
+				{code: ioctlGetConfiguration, outputSize: 8, reply: reply},
+			}}
+			c := newController(d)
+			defer closeController(t, c)
+			if _, err := c.ExcludedDevicePaths(context.Background()); !errors.Is(err, ErrProtocol) {
+				t.Fatalf("accepted malformed size probe: %v", err)
+			}
+		})
 	}
 }
 
@@ -209,12 +276,152 @@ func TestCancelledRequestDoesNotIssueIOCTL(t *testing.T) {
 	}
 }
 
+func TestCancelledCommandLaneWaitDoesNotIssueIOCTL(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	d := &functionTransport{
+		fn: func(_ context.Context, code uint32, _, output []byte) (uint32, error) {
+			if code != ioctlGetState {
+				return 0, fmt.Errorf("unexpected IOCTL %#x", code)
+			}
+			if calls.Add(1) != 1 {
+				return 0, errors.New("queued command issued an IOCTL")
+			}
+			close(started)
+			<-release
+			copy(output, stateReply(StateReady))
+			return 8, nil
+		},
+		onClose: func() error { return nil },
+	}
+	c := newController(d)
+	defer closeController(t, c)
+	first := make(chan error, 1)
+	go func() {
+		_, err := c.State(context.Background())
+		first <- err
+	}()
+	<-started
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.State(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled lane wait: %v", err)
+	}
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("IOCTL calls = %d; want 1", got)
+	}
+}
+
 func TestShutdownClosesEvenIfResetFails(t *testing.T) {
 	resetErr := errors.New("driver reset failed")
 	d := &scriptedTransport{steps: []step{{code: ioctlReset, err: resetErr}}}
 	c := newController(d)
 	if err := c.Shutdown(context.Background()); !errors.Is(err, resetErr) || d.closed != 1 {
 		t.Fatalf("shutdown hid reset failure or leaked handle: %v, %d", err, d.closed)
+	}
+}
+
+func TestCloseReturnsTransportError(t *testing.T) {
+	closeErr := errors.New("close failed")
+	d := &functionTransport{
+		fn:      func(context.Context, uint32, []byte, []byte) (uint32, error) { return 0, nil },
+		onClose: func() error { return closeErr },
+	}
+	c := newController(d)
+	if err := c.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("close error = %v", err)
+	}
+	if err := c.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("repeated close error = %v", err)
+	}
+	var nilController *Controller
+	if err := nilController.Close(); err != nil {
+		t.Fatalf("nil close = %v", err)
+	}
+}
+
+func TestQueryProcessValidatesRequestAndResponse(t *testing.T) {
+	fixture := unhex(t, loadFixture(t).Query)
+	request := make([]byte, 8)
+	le.PutUint64(request, 42)
+	d := &scriptedTransport{steps: []step{
+		{code: ioctlGetState, outputSize: 8, reply: stateReply(StateEngaged)},
+		{code: ioctlQueryProcess, input: request, outputSize: processBufferSize, reply: fixture},
+	}}
+	c := newController(d)
+	defer closeController(t, c)
+	process, err := c.QueryProcess(context.Background(), 42)
+	if err != nil || process.PID != 42 || process.ParentPID != 7 || !process.Split {
+		t.Fatalf("query process: %+v, %v", process, err)
+	}
+	if _, err := c.QueryProcess(context.Background(), 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("zero PID: %v", err)
+	}
+
+	wrongPID := bytes.Clone(fixture)
+	le.PutUint64(wrongPID, 43)
+	d = &scriptedTransport{steps: []step{
+		{code: ioctlGetState, outputSize: 8, reply: stateReply(StateReady)},
+		{code: ioctlQueryProcess, input: request, outputSize: processBufferSize, reply: wrongPID},
+	}}
+	c = newController(d)
+	defer closeController(t, c)
+	if _, err := c.QueryProcess(context.Background(), 42); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("different response PID: %v", err)
+	}
+}
+
+func TestControllerRejectsInvalidCallsAndTransportResponses(t *testing.T) {
+	var nilController *Controller
+	if _, err := nilController.State(context.Background()); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("nil controller: %v", err)
+	}
+	d := &scriptedTransport{}
+	c := newController(d)
+	defer closeController(t, c)
+	//nolint:staticcheck // The public method must reject a nil context safely.
+	if _, err := c.State(nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("nil context: %v", err)
+	}
+	if _, err := c.exchange(context.Background(), ioctlGetState, nil, -1); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("negative output size: %v", err)
+	}
+	if _, err := c.exchange(context.Background(), ioctlGetState, make([]byte, maxBufferSize+1), 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("oversized input: %v", err)
+	}
+	if _, err := c.exchange(context.Background(), ioctlGetState, nil, maxBufferSize+1); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("oversized output: %v", err)
+	}
+
+	excessive := &functionTransport{
+		fn: func(context.Context, uint32, []byte, []byte) (uint32, error) {
+			return 9, nil
+		},
+		onClose: func() error { return nil },
+	}
+	c = newController(excessive)
+	defer closeController(t, c)
+	if _, err := c.State(context.Background()); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("excessive byte count: %v", err)
+	}
+}
+
+func TestSetExcludedPathsChecksBoundsAndCancellationFirst(t *testing.T) {
+	d := &scriptedTransport{}
+	c := newController(d)
+	defer closeController(t, c)
+	if err := c.SetExcludedPaths(context.Background(), make([]string, maxRecords+1)); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("too many paths: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.SetExcludedPaths(ctx, []string{"not-an-absolute-path"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled resolution: %v", err)
 	}
 }
 

@@ -38,7 +38,17 @@ try {
     }
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    & $GoExecutable test -json -count=1 "-tags=$tags" "-run=$runPattern" -p=1 -timeout $timeout ./integration 2>&1 |
+    $coverProfile = Join-Path $ArtifactDir 'e2e-cover.out'
+    $coverageArguments = @()
+    if (-not $Flow) {
+        $coverageArguments = @(
+            '-covermode=atomic',
+            '-coverpkg=github.com/asciimoth/mullvad-split-tunnel-go',
+            "-coverprofile=$coverProfile"
+        )
+    }
+    & $GoExecutable test -json -count=1 "-tags=$tags" "-run=$runPattern" -p=1 -timeout $timeout `
+        @coverageArguments ./integration 2>&1 |
         Tee-Object -FilePath (Join-Path $ArtifactDir 'e2e-events.jsonl') |
         Format-GoTestOutput
     $testExitCode = $LASTEXITCODE
@@ -56,11 +66,18 @@ try {
             'TestSnapshotRegistrationReplaysProcessChanges',
             'TestArrivalAndDepartureEventReasons',
             'TestResetCompletesPendingEventRead',
-            'TestInjectedSetupFailureRecovery'
+            'TestInjectedSetupFailureRecovery',
+            'TestPathResolutionFailurePreservesConfiguration',
+            'TestInvalidStateTransitionsPreserveDriverState',
+            'TestShutdownResetsAndClosesController'
         )
     }
     foreach ($test in $required) {
         if (-not ($events | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'pass' })) { throw "$test has no pass event" }
+    }
+    if (-not $Flow) {
+        & $GoExecutable tool cover "-func=$coverProfile" | Set-Content (Join-Path $ArtifactDir 'e2e-coverage.txt')
+        if ($LASTEXITCODE -ne 0) { throw "coverage report failed with exit code $LASTEXITCODE" }
     }
 } finally {
     if ($started) {

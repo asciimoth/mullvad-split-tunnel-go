@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"reflect"
@@ -333,6 +334,26 @@ func TestSnapshotDoesNotInheritFromRecycledPID(t *testing.T) {
 	}
 }
 
+func TestPublicValueFormatting(t *testing.T) {
+	states := []string{"none", "started", "initialized", "ready", "engaged", "zombie"}
+	for value, want := range states {
+		if got := State(value).String(); got != want {
+			t.Errorf("State(%d).String() = %q; want %q", value, got, want)
+		}
+	}
+	if got := State(99).String(); got != "unknown(99)" {
+		t.Fatalf("unknown state string = %q", got)
+	}
+	for _, value := range []string{
+		"", "00112233", "{00112233-4455-6677-8899-aabbccddeeff",
+		"00112233_4455-6677-8899-aabbccddeeff", "zz112233-4455-6677-8899-aabbccddeeff",
+	} {
+		if _, err := ParseGUID(value); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("ParseGUID(%q): %v", value, err)
+		}
+	}
+}
+
 func FuzzDriverDecoders(f *testing.F) {
 	f.Add([]byte{})
 	f.Add(make([]byte, 64))
@@ -357,5 +378,84 @@ func FuzzDriverDecoders(f *testing.F) {
 		_, _ = decodeState(b)
 		_, _ = decodeEvent(b)
 		_, _ = decodeProcess(b)
+	})
+}
+
+func FuzzConfigurationRoundTrip(f *testing.F) {
+	f.Add([]byte("app.exe"))
+	f.Add([]byte{0, 1, 2, 0xff})
+	f.Add([]byte("beta-β"))
+	f.Fuzz(func(t *testing.T, input []byte) {
+		if len(input) > 4096 {
+			t.Skip()
+		}
+		// Hex produces a valid, exact NT device path for every byte sequence.
+		path := `\Device\Fuzz\` + hex.EncodeToString(input) + ".exe"
+		encoded, err := encodeConfiguration([]string{path})
+		if err != nil {
+			t.Fatalf("encode generated path: %v", err)
+		}
+		decoded, err := decodeConfiguration(encoded)
+		if err != nil || !reflect.DeepEqual(decoded, []string{path}) {
+			t.Fatalf("configuration round trip: %v, %v", decoded, err)
+		}
+		processes := []Process{
+			{PID: 1, ImagePath: path},
+			{PID: 2, ParentPID: 1},
+		}
+		if _, err := encodeProcesses(processes); err != nil {
+			t.Fatalf("encode generated process tree: %v", err)
+		}
+	})
+}
+
+func FuzzProcessEncoding(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0, 1, 2, 3, 0xff})
+	f.Add([]byte("process-tree-seed"))
+	f.Fuzz(func(t *testing.T, input []byte) {
+		if len(input) > 4096 {
+			t.Skip()
+		}
+		count := len(input) + 1
+		processes := make([]Process, count)
+		for i := range processes {
+			processes[i].PID = uint32(i + 1)
+			if i != 0 {
+				processes[i].ParentPID = uint32(input[i-1]) % uint32(i+1)
+			}
+			if i < len(input) && input[i]&1 != 0 {
+				processes[i].ImagePath = fmt.Sprintf(`\Device\Fuzz\%d-%02x.exe`, i, input[i])
+			}
+		}
+		encoded, err := encodeProcesses(processes)
+		if err != nil {
+			t.Fatalf("encode generated process tree: %v", err)
+		}
+		if got := le.Uint64(encoded); got != uint64(count) {
+			t.Fatalf("encoded count = %d; want %d", got, count)
+		}
+		if got := le.Uint64(encoded[8:]); got != uint64(len(encoded)) {
+			t.Fatalf("encoded size = %d; want %d", got, len(encoded))
+		}
+		stringsStart := configHeaderSize + count*processEntrySize
+		for i, process := range processes {
+			entry := encoded[configHeaderSize+i*processEntrySize:]
+			if got := le.Uint64(entry); got != uint64(process.PID) {
+				t.Fatalf("process %d PID = %d; want %d", i, got, process.PID)
+			}
+			if got := le.Uint64(entry[8:]); got != uint64(process.ParentPID) {
+				t.Fatalf("process %d parent = %d; want %d", i, got, process.ParentPID)
+			}
+			offset := int(le.Uint64(entry[16:]))
+			size := int(le.Uint16(entry[24:]))
+			if offset < 0 || size < 0 || offset+size > len(encoded)-stringsStart {
+				t.Fatalf("process %d string range = %d+%d", i, offset, size)
+			}
+			path, err := decodeWide(encoded[stringsStart+offset : stringsStart+offset+size])
+			if err != nil || path != process.ImagePath {
+				t.Fatalf("process %d path = %q, %v; want %q", i, path, err, process.ImagePath)
+			}
+		}
 	})
 }

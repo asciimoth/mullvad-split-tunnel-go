@@ -39,8 +39,10 @@ just test-windows-flow
 The run retains console output, command logs, JSONL observations, both packet
 captures, and `packet-flow-evidence.json` under `.artifacts/winvm/run-ID/`.
 
-The recorded run on 25 September 2026 passed `TestPacketFlowTunnelDemo` against
-the pinned signed driver. Its 12 demo observations covered both protocols and
-address families: four included flows appeared only on the tunnel link, and
-eight excluded or descendant flows appeared only on the underlay link. The
-combined Step 2 and Step 3 capture validation accepted 1,484 observations.
+The recorded run on 25 September 2026 passed `TestPacketFlowTunnelDemo` twice
+against the pinned signed driver. Its 14 demo observations covered both
+protocols and address families: six included flows appeared only on the tunnel
+link, including 1,100-byte UDP payloads, and eight excluded or descendant flows
+appeared only on the underlay link. The command consumed a process event and a
+second start and cleanup cycle passed. The combined Step 2 and Step 3 capture
+validation accepted 1,486 observations in each run.

@@ -4,8 +4,10 @@ package integration
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -149,6 +151,32 @@ func TestPacketFlowTunnelDemo(t *testing.T) {
 			}
 		}
 	}
+	for _, network := range []string{"udp4", "udp6"} {
+		sequence++
+		token := fmt.Sprintf("TDEMO_LARGE_%02d_", sequence) + strings.Repeat("X", 1100)
+		address := flowServiceIPv4
+		wantHost := "10.77.0.2"
+		if network == "udp6" {
+			address = flowServiceIPv6
+			wantHost = "fd00:77::2"
+		}
+		response := processes["included"].request(t, flowRequest{
+			Operation: "once", Network: network, Address: address, Token: token,
+		})
+		if response.Error != "" {
+			t.Fatalf("large included %s: %s", network, response.Error)
+		}
+		if host := flowHost(response.LocalAddr); !strings.EqualFold(host, wantHost) {
+			t.Fatalf("large included %s local address = %s; want %s", network, host, wantHost)
+		}
+		if err := encoder.Encode(flowObservation{
+			Token: token, Cycle: 1, Phase: "tunneldemo-large", Profile: "dual-stack",
+			Role: "included", Network: network, Flow: "new", ExpectedPath: "tunnel",
+			Outcome: "echo", LocalAddr: response.LocalAddr,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := manifest.Sync(); err != nil {
 		t.Fatal(err)
 	}
@@ -163,8 +191,95 @@ func TestPacketFlowTunnelDemo(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatalf("tunneldemo cleanup timeout; see %s", logPath)
 	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(logData, []byte("event id=0")) {
+		t.Fatalf("tunneldemo did not consume a process event; see %s", logPath)
+	}
 	assertTunnelDemoCleanup(t)
 	assertExistingOwnerRejected(t, demoExecutable, roles["excluded"])
+	assertTunnelDemoRestarts(t, demoExecutable, roles["excluded"], artifactDirectory)
+	assertTunnelDemoCleanup(t)
+}
+
+func assertTunnelDemoRestarts(t *testing.T, demoExecutable, exclusion, artifactDirectory string) {
+	t.Helper()
+	stopFile := filepath.Join(t.TempDir(), "restart-stop")
+	command := exec.Command(demoExecutable,
+		"-peer", "198.18.0.1:51900",
+		"-internet-ipv4", "198.18.1.2",
+		"-internet-ipv6", "fd00:18:1::2",
+		"-exclude", exclusion,
+		"-stop-file", stopFile,
+	)
+	output, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.Stderr = command.Stdout
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{})
+	done := make(chan error, 1)
+	finished := false
+	t.Cleanup(func() {
+		if finished {
+			return
+		}
+		_ = command.Process.Kill()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+	})
+	var log bytes.Buffer
+	go func() {
+		scanner := bufio.NewScanner(output)
+		for scanner.Scan() {
+			line := scanner.Text()
+			_, _ = fmt.Fprintln(&log, line)
+			if line == "status=ready" {
+				select {
+				case <-ready:
+				default:
+					close(ready)
+				}
+			}
+		}
+		done <- errors.Join(scanner.Err(), command.Wait())
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		finished = true
+		t.Fatalf("restarted tunneldemo exited before ready: %v\n%s", err, log.String())
+	case <-time.After(45 * time.Second):
+		_ = command.Process.Kill()
+		<-done
+		finished = true
+		t.Fatalf("restarted tunneldemo readiness timeout\n%s", log.String())
+	}
+	if err := os.WriteFile(stopFile, []byte("stop"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		finished = true
+		if err != nil {
+			t.Fatalf("restarted tunneldemo cleanup: %v\n%s", err, log.String())
+		}
+	case <-time.After(30 * time.Second):
+		_ = command.Process.Kill()
+		<-done
+		finished = true
+		t.Fatalf("restarted tunneldemo cleanup timeout\n%s", log.String())
+	}
+	if err := os.WriteFile(filepath.Join(artifactDirectory, "tunneldemo-restart.log"), log.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertTunnelDemoCleanup(t *testing.T) {
