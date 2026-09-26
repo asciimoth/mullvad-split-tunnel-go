@@ -124,7 +124,15 @@ func TestHelperProcess(t *testing.T) {
 	case "":
 		return
 	case "1":
-		time.Sleep(45 * time.Second)
+		duration := 45 * time.Second
+		if value := os.Getenv("SPLIT_TUNNEL_HELPER_DURATION"); value != "" {
+			var err error
+			duration, err = time.ParseDuration(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(duration)
 	case "spawn-child":
 		child := exec.Command(os.Getenv("SPLIT_TUNNEL_HELPER_CHILD"), "-test.run=^TestHelperProcess$")
 		child.Env = append(os.Environ(), "SPLIT_TUNNEL_HELPER=1")
@@ -731,6 +739,137 @@ func TestInheritedProcessSurvivesParentDeparture(t *testing.T) {
 	waitProcessSplit(t, s.c, childPID, false)
 	readExactProcessEvent(t, s.c, childPID, splittunnel.EventStopSplitting,
 		splittunnel.ReasonConfig)
+}
+
+func TestConcurrentProcessArrivalsAndEventBackpressure(t *testing.T) {
+	const processCount = 110
+	s := newLiveSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := s.c.SetAddresses(ctx, splittunnel.Addresses{
+		TunnelIPv4:   netip.MustParseAddr("198.18.0.2"),
+		InternetIPv4: netip.MustParseAddr("198.18.1.2"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	executable := mustExecutable(t)
+	if err := s.c.SetExcludedPaths(ctx, []string{executable}); err != nil {
+		t.Fatal(err)
+	}
+	processStatus(t, s.c, uint32(os.Getpid()), true)
+
+	directory := t.TempDir()
+	basePath := directory + `\arrival-base.exe`
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(basePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commands := make([]*exec.Cmd, processCount)
+	t.Cleanup(func() {
+		for _, command := range commands {
+			if command == nil || command.Process == nil || command.ProcessState != nil {
+				continue
+			}
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+	paths := make(map[uint32]string, processCount)
+	for index := range processCount {
+		path := directory + `\arrival-` + strconv.Itoa(index) + `.exe`
+		if err := os.Link(basePath, path); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command(path, "-test.run=^TestHelperProcess$")
+		command.Env = append(os.Environ(),
+			"SPLIT_TUNNEL_HELPER=1", "SPLIT_TUNNEL_HELPER_DURATION=3m")
+		if err := command.Start(); err != nil {
+			t.Fatalf("start helper %d: %v", index, err)
+		}
+		commands[index] = command
+		paths[uint32(command.Process.Pid)] = path
+	}
+
+	for pid, path := range paths {
+		status := processStatus(t, s.c, pid, true)
+		wantPath, err := splittunnel.ResolveDevicePath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.EqualFold(status.ImagePath, wantPath) {
+			t.Fatalf("PID %d image = %q; want %q", pid, status.ImagePath, wantPath)
+		}
+	}
+	for index, command := range commands {
+		if err := command.Process.Kill(); err != nil {
+			t.Fatalf("kill helper %d: %v", index, err)
+		}
+	}
+	for index, command := range commands {
+		if err := command.Wait(); err == nil {
+			t.Fatalf("killed helper %d exited successfully", index)
+		}
+	}
+
+	remaining := make(map[uint32]bool, len(paths))
+	for pid := range paths {
+		remaining[pid] = true
+	}
+	for len(remaining) != 0 {
+		for pid := range remaining {
+			_, err := s.c.QueryProcess(ctx, pid)
+			if err == nil {
+				continue
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("%d departed helpers remained registered: %v", len(remaining), ctx.Err())
+			}
+			if !errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+				t.Fatalf("query departed PID %d: %v", pid, err)
+			}
+			delete(remaining, pid)
+		}
+		if len(remaining) == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("%d departed helpers remained registered", len(remaining))
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// The pinned driver retains at most 100 unread events. Each helper emitted
+	// an arrival and a later departure, so the queue must contain the newest
+	// 100 departure events and no stale arrivals.
+	seen := make(map[uint32]bool, 100)
+	for range 100 {
+		event, err := s.c.ReadEvent(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.ID != splittunnel.EventStopSplitting || event.Reason != splittunnel.ReasonDeparting {
+			t.Fatalf("retained event = %+v; want a departure event", event)
+		}
+		if paths[event.PID] == "" || seen[event.PID] {
+			t.Fatalf("retained event has unexpected or duplicate PID %d", event.PID)
+		}
+		seen[event.PID] = true
+	}
+	eventCtx, eventCancel := context.WithCancel(context.Background())
+	done := beginPendingEventRead(t, s.c, eventCtx)
+	eventCancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("read after draining retained events: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("read after draining retained events did not cancel")
+	}
 }
 
 func TestResetCompletesPendingEventRead(t *testing.T) {

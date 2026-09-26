@@ -82,6 +82,7 @@ try {
             'TestInvalidStateTransitionsPreserveDriverState',
             'TestReadyEngagedStateTransitions',
             'TestInheritedProcessSurvivesParentDeparture',
+            'TestConcurrentProcessArrivalsAndEventBackpressure',
             'TestShutdownResetsAndClosesController'
         )
     }

@@ -31,11 +31,12 @@ const (
 )
 
 type flowRequest struct {
-	Operation string `json:"operation"`
-	ID        string `json:"id,omitempty"`
-	Network   string `json:"network,omitempty"`
-	Address   string `json:"address,omitempty"`
-	Token     string `json:"token,omitempty"`
+	Operation    string `json:"operation"`
+	ID           string `json:"id,omitempty"`
+	Network      string `json:"network,omitempty"`
+	Address      string `json:"address,omitempty"`
+	LocalAddress string `json:"localAddress,omitempty"`
+	Token        string `json:"token,omitempty"`
 }
 
 type flowResponse struct {
@@ -114,7 +115,7 @@ func runFlowClient(t *testing.T) {
 		switch request.Operation {
 		case "pid":
 		case "once":
-			connection, err := net.DialTimeout(request.Network, request.Address, 3*time.Second)
+			connection, err := dialFlow(request)
 			if err == nil {
 				response.LocalAddr = connection.LocalAddr().String()
 				err = flowExchange(connection, request.Token)
@@ -124,7 +125,7 @@ func runFlowClient(t *testing.T) {
 				response.Error = err.Error()
 			}
 		case "open":
-			connection, err := net.DialTimeout(request.Network, request.Address, 3*time.Second)
+			connection, err := dialFlow(request)
 			if err == nil {
 				connections[request.ID] = connection
 				response.LocalAddr = connection.LocalAddr().String()
@@ -154,6 +155,26 @@ func runFlowClient(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func dialFlow(request flowRequest) (net.Conn, error) {
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	if request.LocalAddress != "" {
+		address := net.JoinHostPort(request.LocalAddress, "0")
+		var err error
+		switch {
+		case strings.HasPrefix(request.Network, "tcp"):
+			dialer.LocalAddr, err = net.ResolveTCPAddr(request.Network, address)
+		case strings.HasPrefix(request.Network, "udp"):
+			dialer.LocalAddr, err = net.ResolveUDPAddr(request.Network, address)
+		default:
+			err = fmt.Errorf("unsupported network %q", request.Network)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return dialer.Dial(request.Network, request.Address)
 }
 
 func flowExchange(connection net.Conn, token string) error {
@@ -575,6 +596,20 @@ func (h *packetFlowTest) onceRemote(phase, profile, role, network, kind, expecte
 	h.observe(phase, profile, role, network, id, expectedPath, suffix, response)
 }
 
+func (h *packetFlowTest) onceBound(
+	phase, role, network, localAddress, expectedPath string,
+) {
+	h.t.Helper()
+	token := h.token()
+	id := strings.Join([]string{phase, role, network, token}, "/")
+	h.currentPaths[id] = token
+	response := h.processes[role].request(h.t, flowRequest{
+		Operation: "once", Network: network, Address: flowRemote(network),
+		LocalAddress: localAddress, Token: token,
+	})
+	h.observe(phase, "dual-stack", role, network, id, expectedPath, "2", response)
+}
+
 func addressesForProfile(profile, suffix string) splittunnel.Addresses {
 	for _, mode := range addressModes(suffix) {
 		if mode.name == profile || profile == "dual-stack" && mode.name == "mode-1-dual-stack" {
@@ -678,6 +713,118 @@ func (h *packetFlowTest) runExclusionChanges() {
 		"excluded": "tunnel", "descendant": "tunnel", "included": "tunnel",
 	}, "2")
 	h.closeActiveFlows(flows)
+}
+
+func (h *packetFlowTest) runExplicitBinds() {
+	h.setProfile("dual-stack", "2")
+	h.setExclusions("excluded", "parent")
+	h.waitRoles("excluded", "descendant")
+	for _, role := range []string{"excluded", "descendant"} {
+		for _, network := range []string{"tcp4", "udp4", "tcp6", "udp6"} {
+			h.onceBound("explicit-tunnel-bind", role, network,
+				expectedFlowAddress("tunnel", network, "2"), "underlay")
+			h.onceBound("explicit-underlay-bind", role, network,
+				expectedFlowAddress("underlay", network, "2"), "underlay")
+		}
+	}
+}
+
+func (h *packetFlowTest) runLocalhostBinds() {
+	h.setProfile("dual-stack", "2")
+	if err := h.session.c.SetExcludedPaths(context.Background(), []string{mustExecutable(h.t)}); err != nil {
+		h.t.Fatal(err)
+	}
+	processStatus(h.t, h.session.c, uint32(os.Getpid()), true)
+
+	for _, network := range []string{"tcp4", "udp4", "tcp6", "udp6"} {
+		host := "127.0.0.1"
+		if strings.HasSuffix(network, "6") {
+			host = "::1"
+		}
+		token := h.token()
+		address, stop, serverDone := startLoopbackEcho(h.t, network, host, token)
+		processStatus(h.t, h.session.c, h.processes["included"].pid, true)
+		response := h.processes["included"].request(h.t, flowRequest{
+			Operation: "once", Network: network, Address: address,
+			LocalAddress: host, Token: token,
+		})
+		var serverErr error
+		select {
+		case serverErr = <-serverDone:
+		case <-time.After(6 * time.Second):
+			stop()
+			serverErr = <-serverDone
+			if serverErr == nil {
+				serverErr = errors.New("echo server timed out")
+			}
+		}
+		stop()
+		if serverErr != nil {
+			h.t.Fatalf("%s loopback echo: %v; client: %s", network, serverErr, response.Error)
+		}
+		if response.Error != "" {
+			h.t.Fatalf("%s loopback client: %s", network, response.Error)
+		}
+		if localHost := flowHost(response.LocalAddr); localHost != host {
+			h.t.Fatalf("%s loopback client used %q; want %s", network, localHost, host)
+		}
+	}
+}
+
+func startLoopbackEcho(
+	t *testing.T, network, host, token string,
+) (address string, stop func(), done <-chan error) {
+	t.Helper()
+	result := make(chan error, 1)
+	if strings.HasPrefix(network, "tcp") {
+		listener, err := net.Listen(network, net.JoinHostPort(host, "0"))
+		if err != nil {
+			t.Fatalf("listen on %s loopback: %v", network, err)
+		}
+		if boundHost := flowHost(listener.Addr().String()); boundHost != host {
+			_ = listener.Close()
+			t.Fatalf("%s loopback bind was redirected to %q", network, boundHost)
+		}
+		go func() {
+			connection, err := listener.Accept()
+			if err == nil {
+				_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
+				payload := make([]byte, len(token))
+				_, err = io.ReadFull(connection, payload)
+				if err == nil && string(payload) != token {
+					err = fmt.Errorf("received %q, want %q", payload, token)
+				}
+				if err == nil {
+					_, err = connection.Write(payload)
+				}
+				_ = connection.Close()
+			}
+			result <- err
+		}()
+		return listener.Addr().String(), func() { _ = listener.Close() }, result
+	}
+
+	connection, err := net.ListenPacket(network, net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Fatalf("listen on %s loopback: %v", network, err)
+	}
+	if boundHost := flowHost(connection.LocalAddr().String()); boundHost != host {
+		_ = connection.Close()
+		t.Fatalf("%s loopback bind was redirected to %q", network, boundHost)
+	}
+	go func() {
+		_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
+		payload := make([]byte, len(token))
+		n, peer, err := connection.ReadFrom(payload)
+		if err == nil && string(payload[:n]) != token {
+			err = fmt.Errorf("received %q, want %q", payload[:n], token)
+		}
+		if err == nil {
+			_, err = connection.WriteTo(payload[:n], peer)
+		}
+		result <- err
+	}()
+	return connection.LocalAddr().String(), func() { _ = connection.Close() }, result
 }
 
 func runAddressCommand(t *testing.T, script string) {
@@ -831,6 +978,8 @@ func TestPacketFlowCharacterization(t *testing.T) {
 		h.runMatrix()
 		h.runWFPInteraction()
 		h.runExclusionChanges()
+		h.runExplicitBinds()
+		h.runLocalhostBinds()
 		h.runAddressChanges()
 		if cycle == 1 {
 			h.reinitialize()
