@@ -3,16 +3,22 @@
 An unofficial Go library for controlling the Mullvad Windows split-tunneling
 driver.
 
+The primary application for this package is
+[sysnet-windows](https://github.com/asciimoth/sysnet-windows) and
+[Almagest](https://github.com/asciimoth/almagest). You can also use it as the
+Linux backend of another VPN application that needs one cross-platform
+system-networking abstraction.
+
 > [!WARNING]
-> This library is in a pre-release state. It has not been
-> independently audited for security. Do not rely on it for production use
-> without your own review and testing.
+> This library is in a pre-release state. It has not been independently audited
+> for security. Do not rely on it for production use without your own review and
+> testing.
 
 <!-- Separate the GitHub alerts into distinct block quotes. -->
 
 > [!NOTE]
-> This independent project is not affiliated with, endorsed by, or
-> sponsored by Mullvad VPN AB. Mullvad is a trademark of its respective owner.
+> This independent project is not affiliated with, endorsed by, or sponsored by
+> Mullvad VPN AB. Mullvad is a trademark of its respective owner.
 
 The controller targets driver **1.3.0.0** on Windows **amd64/arm64**. Static
 analysis, race tests, fuzz tests, and Windows cross-builds pass. Native Windows
