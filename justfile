@@ -32,10 +32,35 @@ test:
     go test -race -count=1 -timeout 2m ./...
 
 fuzz:
-    go test -run '^$' -fuzz '^FuzzDriverDecoders$' -fuzztime 10s .
-    go test -run '^$' -fuzz '^FuzzConfigurationRoundTrip$' -fuzztime 10s .
-    go test -run '^$' -fuzz '^FuzzProcessEncoding$' -fuzztime 10s .
-    go test -run '^$' -fuzz '^FuzzDemoTunnelProtocol$' -fuzztime 10s ./internal/demotunnel
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+        printf 'Skipping fuzzing in GitHub Actions.\n'
+        exit 0
+    fi
+    fuzz_time="$({
+        python3 - "${FUZZ_TIME:-1m}" <<'PY'
+    import re
+    import sys
+
+    value = sys.argv[1]
+    units = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "μs": 1e-6,
+             "ms": 1e-3, "s": 1, "m": 60, "h": 3600}
+    parts = re.findall(r"(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)", value)
+    if not parts or "".join(number + unit for number, unit in parts) != value:
+        raise SystemExit(f"invalid FUZZ_TIME duration: {value!r}")
+    seconds = sum(float(number) * units[unit] for number, unit in parts)
+    if seconds <= 0:
+        raise SystemExit("FUZZ_TIME must be positive")
+    print(f"{seconds / 6:.9f}s")
+    PY
+    })"
+    go test -run '^$' -fuzz '^FuzzDriverDecoders$' -fuzztime "$fuzz_time" .
+    go test -run '^$' -fuzz '^FuzzConfigurationRoundTrip$' -fuzztime "$fuzz_time" .
+    go test -run '^$' -fuzz '^FuzzProcessEncoding$' -fuzztime "$fuzz_time" .
+    go test -run '^$' -fuzz '^FuzzGUID$' -fuzztime "$fuzz_time" .
+    go test -run '^$' -fuzz '^FuzzParseConfig$' -fuzztime "$fuzz_time" ./cmd/tunneldemo
+    go test -run '^$' -fuzz '^FuzzDemoTunnelProtocol$' -fuzztime "$fuzz_time" ./internal/demotunnel
 
 vulncheck:
     govulncheck ./...

@@ -198,7 +198,10 @@ func TestUDPReplyIPv6WithOddPayload(t *testing.T) {
 
 func FuzzDemoTunnelProtocol(f *testing.F) {
 	f.Add(ipv4Packet(17, udpSegment([]byte("seed"))))
+	f.Add(ipv4Packet(6, tcpSegment(0x02, nil, 24)))
+	f.Add(ipv6Packet(17, udpSegment([]byte("odd"))))
 	f.Add(ipv6Packet(6, tcpSegment(0x02, nil, 20)))
+	f.Add([]byte("invalid demo datagram"))
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, packet []byte) {
 		encoded := Encode(packet)

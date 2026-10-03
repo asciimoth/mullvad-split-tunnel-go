@@ -140,6 +140,12 @@ just test-total
 See the [Windows VM guide](dev/winvm/README.md) for media setup, individual
 gates, and failure recovery.
 
+Run all fuzz targets with a shared one-minute budget with `just fuzz`. Set
+`FUZZ_TIME` to change this total budget, for example `FUZZ_TIME=30s just fuzz`.
+The recipe divides the budget equally between the targets. GitHub Actions skips
+active fuzzing, but it still runs each fuzz target's seed corpus as part of the
+ordinary Go tests.
+
 Run the Nix-managed repository checks without entering the shell with:
 
 ```sh

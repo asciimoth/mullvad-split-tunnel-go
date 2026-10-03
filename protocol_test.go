@@ -396,11 +396,29 @@ func FuzzDriverDecoders(f *testing.F) {
 		if len(b) > eventBufferSize {
 			t.Skip()
 		}
+		_, _ = decodeConfigurationSize(b)
 		_, _ = decodeConfiguration(b)
 		_, _ = decodeAddresses(b)
 		_, _ = decodeState(b)
 		_, _ = decodeEvent(b)
 		_, _ = decodeProcess(b)
+	})
+}
+
+func FuzzGUID(f *testing.F) {
+	f.Add("")
+	f.Add("00112233-4455-6677-8899-aabbccddeeff")
+	f.Add("{ffeeddcc-bbaa-9988-7766-554433221100}")
+	f.Add("zz112233-4455-6677-8899-aabbccddeeff")
+	f.Fuzz(func(t *testing.T, input string) {
+		guid, err := ParseGUID(input)
+		if err != nil {
+			return
+		}
+		roundTrip, err := ParseGUID(guid.String())
+		if err != nil || roundTrip != guid {
+			t.Fatalf("GUID round trip = %v, %v; want %v", roundTrip, err, guid)
+		}
 	})
 }
 

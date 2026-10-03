@@ -118,6 +118,17 @@ func (c *Controller) exchange(ctx context.Context, code uint32, input []byte, ou
 	return output[:int(n)], nil
 }
 
+func decodeConfigurationSize(b []byte) (int, error) {
+	if len(b) != 8 {
+		return 0, fmt.Errorf("%w: invalid configuration size probe", ErrProtocol)
+	}
+	required := le.Uint64(b)
+	if required < configHeaderSize || required > maxBufferSize {
+		return 0, fmt.Errorf("%w: configuration size out of bounds", ErrProtocol)
+	}
+	return int(required), nil
+}
+
 func (c *Controller) state(ctx context.Context) (State, error) {
 	b, err := c.exchange(ctx, ioctlGetState, nil, 8)
 	if err != nil {
@@ -350,14 +361,11 @@ func (c *Controller) ExcludedDevicePaths(ctx context.Context) (paths []string, e
 		if e != nil {
 			return e
 		}
-		if len(size) != 8 {
-			return fmt.Errorf("%w: invalid configuration size probe", ErrProtocol)
+		required, e := decodeConfigurationSize(size)
+		if e != nil {
+			return e
 		}
-		required := le.Uint64(size)
-		if required < configHeaderSize || required > maxBufferSize {
-			return fmt.Errorf("%w: configuration size out of bounds", ErrProtocol)
-		}
-		b, e := c.exchange(ctx, ioctlGetConfiguration, nil, int(required))
+		b, e := c.exchange(ctx, ioctlGetConfiguration, nil, required)
 		if e != nil {
 			return e
 		}

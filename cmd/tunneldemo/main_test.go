@@ -79,3 +79,35 @@ func TestParseConfigMasksRoutePrefixes(t *testing.T) {
 		t.Fatalf("routes were not masked: %v, %v", configuration.routeIPv4, configuration.routeIPv6)
 	}
 }
+
+func FuzzParseConfig(f *testing.F) {
+	f.Add("192.0.2.1:51900", "192.0.2.2", "2001:db8::2", "10.77.0.2/24", "fd00:77::2/64", `C:\demo\excluded.exe`)
+	f.Add("", "::1", "fe80::1", "0.0.0.0/0", "127.0.0.1/8", "")
+	f.Fuzz(func(t *testing.T, peer, internetIPv4, internetIPv6, tunnelIPv4, tunnelIPv6, exclusion string) {
+		arguments := []string{
+			"-peer", peer,
+			"-internet-ipv4", internetIPv4,
+			"-internet-ipv6", internetIPv6,
+			"-tunnel-ipv4", tunnelIPv4,
+			"-tunnel-ipv6", tunnelIPv6,
+			"-exclude", exclusion,
+		}
+		configuration, err := parseConfig(arguments)
+		if err != nil {
+			return
+		}
+		if !configuration.tunnelIPv4.Addr().Is4() || configuration.tunnelIPv4.Addr().IsUnspecified() {
+			t.Fatalf("accepted invalid IPv4 tunnel prefix %q", tunnelIPv4)
+		}
+		if !configuration.tunnelIPv6.Addr().Is6() || configuration.tunnelIPv6.Addr().IsUnspecified() {
+			t.Fatalf("accepted invalid IPv6 tunnel prefix %q", tunnelIPv6)
+		}
+		if !configuration.internetIPv4.Is4() || configuration.internetIPv4.IsUnspecified() {
+			t.Fatalf("accepted invalid Internet IPv4 address %q", internetIPv4)
+		}
+		if internetIPv6 != "" && (!configuration.internetIPv6.Is6() ||
+			configuration.internetIPv6.IsUnspecified() || configuration.internetIPv6.IsLinkLocalUnicast()) {
+			t.Fatalf("accepted invalid Internet IPv6 address %q", internetIPv6)
+		}
+	})
+}
